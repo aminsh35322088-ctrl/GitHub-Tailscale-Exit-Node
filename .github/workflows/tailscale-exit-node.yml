@@ -1,0 +1,115 @@
+name: Tailscale Exit Node
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+
+  workflow_dispatch:
+
+concurrency:
+  group: tailscale-exit-node
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  exit-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:exit
+          hostname: cynet-linux-exit
+          args: --advertise-exit-node --accept-dns=false
+
+      - name: Verify Tailscale
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "Checking Tailscale..."
+          echo "=========================================="
+
+          READY=false
+
+          for i in {1..12}; do
+            if tailscale status >/dev/null 2>&1; then
+              READY=true
+              echo "Tailscale is ready."
+              break
+            fi
+
+            echo "Tailscale is not ready. Retry $i/12..."
+            sleep 5
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "ERROR: Tailscale failed to become ready."
+            exit 1
+          fi
+
+          echo
+          echo "Tailscale IPv4:"
+          tailscale ip -4
+
+          echo
+          echo "Tailscale status:"
+          tailscale status
+
+      - name: Keep Exit Node Alive
+        shell: bash
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "     TAILSCALE EXIT NODE IS RUNNING"
+          echo "=========================================="
+
+          # حدود 5 ساعت و 35 دقیقه
+          for i in {1..335}; do
+            sleep 60
+
+            if tailscale status >/dev/null 2>&1; then
+              echo "[$i/335] Tailscale OK."
+              continue
+            fi
+
+            echo "[$i/335] WARNING: Tailscale appears unhealthy."
+            echo "Attempting to reconnect..."
+
+            tailscale up \
+              --advertise-exit-node \
+              --accept-dns=false \
+              --hostname=cynet-linux-exit \
+              || true
+
+            sleep 10
+
+            if tailscale status >/dev/null 2>&1; then
+              echo "[$i/335] Tailscale successfully recovered."
+            else
+              echo "[$i/335] WARNING: Tailscale recovery attempt failed."
+            fi
+          done
+
+      - name: Final Tailscale Status
+        if: always()
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "Final Tailscale status"
+          echo "=========================================="
+
+          tailscale status || true
+
+          echo
+          echo "Tailscale IPv4:"
+          tailscale ip -4 || true
