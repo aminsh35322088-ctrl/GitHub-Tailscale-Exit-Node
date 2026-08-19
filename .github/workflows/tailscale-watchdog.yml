@@ -1,0 +1,85 @@
+name: Tailscale Exit Node Watchdog
+
+on:
+  schedule:
+    # هر 15 دقیقه
+    - cron: '7,22,37,52 * * * *'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tailscale-exit-node-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Check Exit Node Workflow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: tailscale-exit-node.yml
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Tailscale Exit Node Watchdog"
+          echo "=========================================="
+
+          echo "Repository: $REPO"
+          echo "Workflow:   $WORKFLOW"
+
+          RUNS_JSON=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=10")
+
+          ACTIVE_COUNT=$(echo "$RUNS_JSON" | jq '
+            [
+              .workflow_runs[]
+              | select(
+                  .status == "queued"
+                  or .status == "in_progress"
+                  or .status == "waiting"
+                  or .status == "requested"
+                  or .status == "pending"
+                )
+            ] | length
+          ')
+
+          echo "Active Exit Node runs: $ACTIVE_COUNT"
+
+          if [ "$ACTIVE_COUNT" -gt 0 ]; then
+            echo "Exit Node workflow is already active."
+            exit 0
+          fi
+
+          echo "No active Exit Node run found."
+          echo "Starting a new Exit Node workflow..."
+
+          HTTP_CODE=$(curl -sS -o /tmp/dispatch-response.json \
+            -w "%{http_code}" \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/dispatches" \
+            -d "{\"ref\":\"${GITHUB_REF_NAME}\"}")
+
+          echo "Dispatch HTTP status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Failed to dispatch Exit Node workflow."
+            cat /tmp/dispatch-response.json || true
+            exit 1
+          fi
+
+          echo "Exit Node workflow dispatch requested successfully."
