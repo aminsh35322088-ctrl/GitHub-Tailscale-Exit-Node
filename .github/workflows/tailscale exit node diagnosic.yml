@@ -1,0 +1,239 @@
+name: Tailscale Exit Node - Diagnostic
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: tailscale-exit-node-diagnostic
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  exit-node-diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+
+      - name: Basic System Diagnostics
+        shell: bash
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "SYSTEM"
+          echo "=========================================="
+
+          echo
+          echo "--- OS ---"
+          uname -a
+          cat /etc/os-release || true
+
+          echo
+          echo "--- CPU ---"
+          nproc
+          lscpu | grep -E 'Model name|CPU\(s\)|Thread|Core|Socket' || true
+
+          echo
+          echo "--- Memory ---"
+          free -h
+
+          echo
+          echo "=========================================="
+          echo "NETWORK INTERFACES"
+          echo "=========================================="
+
+          ip -br addr
+
+          echo
+          echo "--- Links ---"
+          ip -br link
+
+          echo
+          echo "--- Interface statistics ---"
+          ip -s link
+
+      - name: Routing and Forwarding Diagnostics
+        shell: bash
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "ROUTING / FORWARDING"
+          echo "=========================================="
+
+          echo
+          echo "--- IPv4 forwarding ---"
+          sysctl net.ipv4.ip_forward || true
+
+          echo
+          echo "--- IPv6 forwarding ---"
+          sysctl net.ipv6.conf.all.forwarding || true
+
+          echo
+          echo "--- IPv4 routes ---"
+          ip -4 route
+
+          echo
+          echo "--- IPv6 routes ---"
+          ip -6 route || true
+
+          echo
+          echo "--- Policy routing ---"
+          ip rule
+
+          echo
+          echo "--- Default route ---"
+          ip route get 1.1.1.1 || true
+
+      - name: MTU Diagnostics
+        shell: bash
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "MTU"
+          echo "=========================================="
+
+          ip -br link | while read -r iface rest; do
+            echo
+            echo "--- $iface ---"
+            ip link show "$iface" | grep -o 'mtu [0-9]*' || true
+          done
+
+      - name: TCP Diagnostics
+        shell: bash
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "TCP"
+          echo "=========================================="
+
+          echo
+          echo "--- Congestion control ---"
+          sysctl net.ipv4.tcp_congestion_control || true
+
+          echo
+          echo "--- Available congestion controls ---"
+          sysctl net.ipv4.tcp_available_congestion_control || true
+
+          echo
+          echo "--- TCP buffer settings ---"
+          sysctl net.ipv4.tcp_rmem || true
+          sysctl net.ipv4.tcp_wmem || true
+
+          echo
+          echo "--- TCP socket summary ---"
+          ss -s || true
+
+      - name: Tailscale Connect
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:exit
+          hostname: cynet-linux-exit-diagnostic
+          args: --advertise-exit-node --accept-dns=false
+
+      - name: Tailscale Diagnostics
+        shell: bash
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "TAILSCALE"
+          echo "=========================================="
+
+          echo
+          echo "--- Version ---"
+          tailscale version || true
+
+          echo
+          echo "--- IPv4 ---"
+          tailscale ip -4 || true
+
+          echo
+          echo "--- IPv6 ---"
+          tailscale ip -6 || true
+
+          echo
+          echo "--- Status ---"
+          tailscale status || true
+
+          echo
+          echo "--- Netcheck ---"
+          tailscale netcheck || true
+
+          echo
+          echo "--- Tailscale debug prefs ---"
+          tailscale debug prefs || true
+
+      - name: Post-Tailscale Network Diagnostics
+        shell: bash
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "POST-TAILSCALE NETWORK STATE"
+          echo "=========================================="
+
+          echo
+          echo "--- Interfaces ---"
+          ip -br addr
+
+          echo
+          echo "--- Routes ---"
+          ip route
+
+          echo
+          echo "--- Tailscale interface ---"
+          ip link show tailscale0 || true
+
+          echo
+          echo "--- Forwarding ---"
+          sysctl net.ipv4.ip_forward || true
+          sysctl net.ipv6.conf.all.forwarding || true
+
+          echo
+          echo "--- Firewall / NAT ---"
+          sudo iptables -S || true
+          sudo iptables -t nat -S || true
+
+          echo
+          echo "--- nftables ---"
+          sudo nft list ruleset || true
+
+      - name: Basic Internet Connectivity
+        shell: bash
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "INTERNET CONNECTIVITY"
+          echo "=========================================="
+
+          echo
+          echo "--- Route to Cloudflare DNS ---"
+          ip route get 1.1.1.1 || true
+
+          echo
+          echo "--- Ping ---"
+          ping -c 4 -W 2 1.1.1.1 || true
+
+          echo
+          echo "--- HTTPS connectivity ---"
+          curl -4 -I --max-time 10 https://www.cloudflare.com/ || true
+
+      - name: Diagnostic Summary
+        shell: bash
+        run: |
+          echo
+          echo "=========================================="
+          echo "DIAGNOSTIC COMPLETE"
+          echo "=========================================="
+          echo
+          echo "Send the Actions log from this run for analysis."
+          echo "No SSH access or persistent changes were required."
