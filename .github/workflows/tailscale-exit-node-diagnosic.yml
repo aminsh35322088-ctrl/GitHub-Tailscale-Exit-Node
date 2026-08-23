@@ -1,43 +1,21 @@
-name: Tailscale Exit Node
+name: Tailscale SSH Diagnostic
 
 on:
-  schedule:
-    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: tailscale-exit-node
-  cancel-in-progress: false
+  group: tailscale-ssh-diagnostic
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  exit-node:
+  diagnostic:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 15
 
     steps:
-
-      # ========================================
-      # NETWORK / EXIT NODE SETUP
-      # ========================================
-
-      - name: Enable IP Forwarding
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sudo sysctl -w net.ipv4.ip_forward=1
-
-          echo "IPv4 forwarding:"
-          sysctl net.ipv4.ip_forward
-
-
-      # ========================================
-      # CONNECT TAILSCALE
-      # ========================================
-
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -45,75 +23,18 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
 
           tags: tag:exit
-          hostname: cynet-linux-exit
 
-          # Always request latest stable Tailscale version
+          # جدا از hostname اصلی Exit Node
+          hostname: cynet-linux-ssh-diagnostic
+
+          # آخرین نسخه
           version: latest
 
-          # Disable binary cache for debugging/version freshness
+          # بدون cache برای تست نسخه جدید
           use-cache: "false"
 
-          # Make action logs easier to inspect
-          log-mode: normal
-
-          args: >-
-            --advertise-routes=0.0.0.0/0
-            --accept-dns=false
-
-
-      # ========================================
-      # VERIFY TAILSCALE
-      # ========================================
-
-      - name: Verify Tailscale
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          READY=false
-
-          for i in {1..12}; do
-            if tailscale status >/dev/null 2>&1; then
-              READY=true
-              echo "Tailscale is ready."
-              break
-            fi
-
-            echo "Tailscale is not ready. Retry $i/12..."
-            sleep 5
-          done
-
-          if [ "$READY" != "true" ]; then
-            echo "ERROR: Tailscale failed to become ready."
-            exit 1
-          fi
-
-          echo
-          echo "========================================"
-          echo "INSTALLED TAILSCALE VERSION"
-          echo "========================================"
-          tailscale version
-
-          echo
-          echo "Tailscale binary:"
-          command -v tailscale
-
-          echo
-          echo "Tailscaled binary:"
-          command -v tailscaled || true
-
-          echo
-          echo "Tailscale IPv4:"
-          tailscale ip -4
-
-          echo
-          echo "Tailscale status:"
-          tailscale status
-
-
-      # ========================================
-      # ENABLE TAILSCALE SSH
-      # ========================================
+          # عمداً هیچ exit routeی advertise نمی‌کنیم
+          args: --accept-dns=false
 
       - name: Enable Tailscale SSH
         shell: bash
@@ -121,67 +42,26 @@ jobs:
           set -euxo pipefail
 
           echo "Enabling Tailscale SSH..."
-
-          # Official Tailscale method
           tailscale set --ssh
 
-          echo
-          echo "Tailscale SSH enable command completed."
-
-          # Give control-plane/key propagation a few seconds
           sleep 5
 
-          echo
-          echo "Current Tailscale prefs:"
-          tailscale debug prefs
-
-
-      # ========================================
-      # DEBUG TAILSCALE SSH
-      # ========================================
-
-      - name: Debug Tailscale SSH
+      - name: Diagnostic
         shell: bash
         run: |
           set +e
 
           echo "========================================"
-          echo "CURRENT WORKFLOW USER"
+          echo "CURRENT USER"
           echo "========================================"
-
           whoami
           id
           echo "HOME=$HOME"
 
           echo
           echo "========================================"
-          echo "HOST INFORMATION"
+          echo "AVAILABLE LOGIN USERS"
           echo "========================================"
-
-          hostname
-          hostname -f || true
-          cat /etc/hostname || true
-
-          echo
-          echo "========================================"
-          echo "USERS WITH UID >= 1000"
-          echo "========================================"
-
-          getent passwd | awk -F: '
-            $3 >= 1000 {
-              print "user=" $1 \
-                    " uid=" $3 \
-                    " gid=" $4 \
-                    " home=" $6 \
-                    " shell=" $7
-            }
-          ' || true
-
-          echo
-          echo "========================================"
-          echo "USERS WITH LOGIN SHELLS"
-          echo "========================================"
-
           getent passwd | awk -F: '
             $7 !~ /(nologin|false)$/ {
               print "user=" $1 \
@@ -189,98 +69,63 @@ jobs:
                     " home=" $6 \
                     " shell=" $7
             }
-          ' || true
-
+          '
 
           echo
           echo "========================================"
           echo "PASSWORD STATUS"
           echo "========================================"
-
-          echo "Root:"
+          echo "root:"
           sudo passwd -S root || true
 
-          echo
-          echo "Current workflow user:"
           CURRENT_USER="$(whoami)"
-          sudo passwd -S "$CURRENT_USER" || true
 
           echo
-          echo "NOTE:"
-          echo "Actual passwords are NOT printed."
-
+          echo "Current user ($CURRENT_USER):"
+          sudo passwd -S "$CURRENT_USER" || true
 
           echo
           echo "========================================"
           echo "TAILSCALE VERSION"
           echo "========================================"
-
           tailscale version || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE IP"
           echo "========================================"
-
           tailscale ip -4 || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE STATUS"
           echo "========================================"
-
           tailscale status || true
-
 
           echo
           echo "========================================"
-          echo "TAILSCALE DEBUG PREFS"
+          echo "TAILSCALE PREFS"
           echo "========================================"
-
           tailscale debug prefs || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE STATUS JSON"
           echo "========================================"
-
           tailscale status --json || true
-
 
           echo
           echo "========================================"
-          echo "TAILSCALED PROCESS"
+          echo "TAILSCALE HOSTNAME"
           echo "========================================"
-
-          ps aux | grep '[t]ailscaled' || true
-
+          hostname || true
+          hostname -f || true
 
           echo
           echo "========================================"
           echo "TAILSCALE STATE DIRECTORY"
           echo "========================================"
-
-          sudo ls -lah /var/lib/tailscale 2>/dev/null || true
-
-
-          echo
-          echo "========================================"
-          echo "TAILSCALE SSH / HOST KEY FILES"
-          echo "========================================"
-
-          sudo find /var/lib/tailscale \
-            -maxdepth 3 \
-            -type f \
-            \( \
-              -iname '*ssh*' \
-              -o -iname '*host*key*' \
-              -o -iname '*machine*key*' \
-            \) \
-            -print 2>/dev/null || true
-
+          sudo ls -lah /var/lib/tailscale || true
 
           echo
           echo "========================================"
@@ -295,150 +140,52 @@ jobs:
             fi
           done
 
-
           echo
           echo "========================================"
           echo "PORT 22 LISTENERS"
           echo "========================================"
-
           sudo ss -ltnp | grep ':22' || true
-
-
-          echo
-          echo "========================================"
-          echo "ALL SSH LISTENERS"
-          echo "========================================"
-
-          sudo ss -ltnp | grep ssh || true
-
 
           echo
           echo "========================================"
           echo "SSH / TAILSCALE PROCESSES"
           echo "========================================"
-
           ps aux | grep -E '[t]ailscaled|[s]shd' || true
-
 
           echo
           echo "========================================"
           echo "SYSTEM SSH SERVICE"
           echo "========================================"
-
           sudo systemctl status ssh --no-pager || true
           sudo systemctl status sshd --no-pager || true
-
 
           echo
           echo "========================================"
           echo "EFFECTIVE SSHD CONFIG"
           echo "========================================"
-
           sudo sshd -T 2>/dev/null | \
-            grep -E \
-            '^(port|listenaddress|passwordauthentication|permitrootlogin|pubkeyauthentication|kbdinteractiveauthentication)' \
+            grep -E '^(port|listenaddress|passwordauthentication|permitrootlogin|pubkeyauthentication|kbdinteractiveauthentication)' \
             || true
-
 
           echo
           echo "========================================"
           echo "NETWORK INTERFACES"
           echo "========================================"
-
           ip addr || true
-
 
           echo
           echo "========================================"
           echo "ROUTING TABLE"
           echo "========================================"
-
           ip route || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE NETCHECK"
           echo "========================================"
-
           tailscale netcheck || true
 
-
           echo
           echo "========================================"
-          echo "DEBUG COMPLETE"
+          echo "DIAGNOSTIC COMPLETE"
           echo "========================================"
-
-
-      # ========================================
-      # KEEP EXIT NODE ALIVE
-      # ========================================
-
-      - name: Keep Exit Node Alive
-        shell: bash
-        run: |
-          set -u
-
-          for i in {1..335}; do
-            sleep 60
-
-            if tailscale status >/dev/null 2>&1; then
-              echo "[$i/335] Tailscale OK."
-              continue
-            fi
-
-            echo "[$i/335] WARNING: Tailscale appears unhealthy."
-            echo "Attempting recovery..."
-
-            sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-            tailscale up \
-              --advertise-routes=0.0.0.0/0 \
-              --accept-dns=false \
-              --ssh \
-              --hostname=cynet-linux-exit \
-              || true
-
-            sleep 10
-
-            echo
-            echo "Recovery status:"
-            tailscale status || true
-
-            echo
-            echo "Recovery prefs:"
-            tailscale debug prefs || true
-
-            if tailscale status >/dev/null 2>&1; then
-              echo "[$i/335] Tailscale successfully recovered."
-            else
-              echo "[$i/335] WARNING: Tailscale recovery attempt failed."
-            fi
-          done
-
-
-      # ========================================
-      # FINAL STATUS
-      # ========================================
-
-      - name: Final Tailscale Status
-        if: always()
-        shell: bash
-        run: |
-          echo "========================================"
-          echo "FINAL TAILSCALE STATUS"
-          echo "========================================"
-
-          tailscale status || true
-
-          echo
-          echo "Final Tailscale IPv4:"
-          tailscale ip -4 || true
-
-          echo
-          echo "Final Tailscale version:"
-          tailscale version || true
-
-          echo
-          echo "Final Tailscale prefs:"
-          tailscale debug prefs || true
