@@ -13,7 +13,7 @@ permissions:
 jobs:
   diagnostic:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
 
     steps:
 
@@ -30,10 +30,7 @@ jobs:
           tags: tag:exit
           hostname: cynet-linux-ssh-diagnostic
 
-          # Latest stable version
           version: latest
-
-          # Disable cache for version diagnostics
           use-cache: "false"
 
           # Diagnostic node: do NOT advertise exit routes
@@ -92,7 +89,6 @@ jobs:
           echo
           echo "Tailscale SSH enable command completed."
 
-          # Give tailscaled/control-plane a few seconds
           sleep 5
 
           echo
@@ -163,7 +159,6 @@ jobs:
             }
           ' || true
 
-
           echo
           echo "========================================"
           echo "PASSWORD STATUS"
@@ -181,70 +176,53 @@ jobs:
           echo
           echo "Passwords themselves are NOT printed."
 
-
           echo
           echo "========================================"
           echo "TAILSCALE VERSION"
           echo "========================================"
-
           tailscale version || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE IP"
           echo "========================================"
-
           tailscale ip -4 || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE STATUS"
           echo "========================================"
-
           tailscale status || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE PREFS"
           echo "========================================"
-
           sudo tailscale debug prefs || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE STATUS JSON"
           echo "========================================"
-
           tailscale status --json || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALED PROCESS"
           echo "========================================"
-
           ps aux | grep '[t]ailscaled' || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALED SYSTEM STATUS"
           echo "========================================"
-
           sudo systemctl status tailscaled --no-pager || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE STATE DIRECTORY"
           echo "========================================"
-
           sudo ls -lah /var/lib/tailscale 2>/dev/null || true
-
 
           echo
           echo "========================================"
@@ -262,7 +240,6 @@ jobs:
             \) \
             -print 2>/dev/null || true
 
-
           echo
           echo "========================================"
           echo "LOCAL OPENSSH HOST KEY FINGERPRINTS"
@@ -276,39 +253,30 @@ jobs:
             fi
           done
 
-
           echo
           echo "========================================"
           echo "PORT 22 LISTENERS"
           echo "========================================"
-
           sudo ss -ltnp | grep ':22' || true
-
 
           echo
           echo "========================================"
           echo "ALL SSH LISTENERS"
           echo "========================================"
-
           sudo ss -ltnp | grep -E 'ssh|:22' || true
-
 
           echo
           echo "========================================"
           echo "SSH / TAILSCALE PROCESSES"
           echo "========================================"
-
           ps aux | grep -E '[t]ailscaled|[s]shd' || true
-
 
           echo
           echo "========================================"
           echo "SYSTEM SSH SERVICE"
           echo "========================================"
-
           sudo systemctl status ssh --no-pager || true
           sudo systemctl status sshd --no-pager || true
-
 
           echo
           echo "========================================"
@@ -320,7 +288,6 @@ jobs:
             '^(port|listenaddress|passwordauthentication|permitrootlogin|pubkeyauthentication|kbdinteractiveauthentication)' \
             || true
 
-
           echo
           echo "========================================"
           echo "TAILSCALED LOGS - RECENT"
@@ -331,35 +298,61 @@ jobs:
             -n 150 \
             || true
 
-
           echo
           echo "========================================"
           echo "NETWORK INTERFACES"
           echo "========================================"
-
           ip addr || true
-
 
           echo
           echo "========================================"
           echo "ROUTING TABLE"
           echo "========================================"
-
           ip route || true
-
 
           echo
           echo "========================================"
           echo "TAILSCALE NETCHECK"
           echo "========================================"
-
           tailscale netcheck || true
-
 
           echo
           echo "========================================"
           echo "DIAGNOSTIC COMPLETE"
           echo "========================================"
+
+
+      # ========================================
+      # KEEP DIAGNOSTIC NODE ONLINE FOR TESTING
+      # ========================================
+
+      - name: Keep Diagnostic Node Online For SSH Testing
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "SSH TEST WINDOW STARTED"
+          echo "========================================"
+          echo
+          echo "This diagnostic node will remain online for 30 minutes."
+          echo
+          echo "Test from Windows with:"
+          echo
+          echo "tailscale ssh runner@cynet-linux-ssh-diagnostic"
+          echo
+          echo "Or:"
+          echo
+          echo "ssh runner@cynet-linux-ssh-diagnostic.tail57d500.ts.net"
+          echo
+          echo "========================================"
+
+          for i in {1..30}; do
+            echo "[$i/30] Diagnostic node still online."
+            tailscale status || true
+            sleep 60
+          done
+
+          echo
+          echo "30-minute SSH test window completed."
 
 
       # ========================================
