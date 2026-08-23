@@ -3,7 +3,6 @@ name: Tailscale Exit Node
 on:
   schedule:
     - cron: '17 */6 * * *'
-
   workflow_dispatch:
 
 concurrency:
@@ -24,21 +23,9 @@ jobs:
         shell: bash
         run: |
           set -e
-
-          echo "=========================================="
-          echo "Enabling IP forwarding"
-          echo "=========================================="
-
           sudo sysctl -w net.ipv4.ip_forward=1
-          sudo sysctl -w net.ipv6.conf.all.forwarding=1
-
-          echo
           echo "IPv4 forwarding:"
           sysctl net.ipv4.ip_forward
-
-          echo
-          echo "IPv6 forwarding:"
-          sysctl net.ipv6.conf.all.forwarding
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
@@ -47,26 +34,21 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:exit
           hostname: cynet-linux-exit
-          args: --advertise-exit-node --accept-dns=false
+          version: latest
+          args: --advertise-routes=0.0.0.0/0 --accept-dns=false --ssh
 
       - name: Verify Tailscale
         shell: bash
         run: |
           set -e
 
-          echo "=========================================="
-          echo "Checking Tailscale..."
-          echo "=========================================="
-
           READY=false
-
           for i in {1..12}; do
             if tailscale status >/dev/null 2>&1; then
               READY=true
               echo "Tailscale is ready."
               break
             fi
-
             echo "Tailscale is not ready. Retry $i/12..."
             sleep 5
           done
@@ -76,59 +58,32 @@ jobs:
             exit 1
           fi
 
-          echo
           echo "Tailscale IPv4:"
           tailscale ip -4
 
-          echo
-          echo "Tailscale IPv6:"
-          tailscale ip -6 || true
-
-          echo
           echo "Tailscale status:"
           tailscale status
-
-          echo
-          echo "Forwarding status:"
-          sysctl net.ipv4.ip_forward
-          sysctl net.ipv6.conf.all.forwarding
-
-          echo
-          echo "Network interfaces:"
-          ip -br link
 
       - name: Keep Exit Node Alive
         shell: bash
         run: |
           set -u
 
-          echo "=========================================="
-          echo "     TAILSCALE EXIT NODE IS RUNNING"
-          echo "=========================================="
-
-          # حدود 5 ساعت و 35 دقیقه
           for i in {1..335}; do
             sleep 60
 
             if tailscale status >/dev/null 2>&1; then
               echo "[$i/335] Tailscale OK."
-
-              # Make sure forwarding remains enabled.
-              sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
-              sudo sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
-
               continue
             fi
 
-            echo "[$i/335] WARNING: Tailscale appears unhealthy."
-            echo "Attempting to reconnect..."
-
+            echo "[$i/335] WARNING: Tailscale appears unhealthy. Reconnecting..."
             sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
-            sudo sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
 
             tailscale up \
-              --advertise-exit-node \
+              --advertise-routes=0.0.0.0/0 \
               --accept-dns=false \
+              --ssh \
               --hostname=cynet-linux-exit \
               || true
 
@@ -145,21 +100,8 @@ jobs:
         if: always()
         shell: bash
         run: |
-          echo "=========================================="
-          echo "Final Tailscale status"
-          echo "=========================================="
-
+          echo "Final Tailscale status:"
           tailscale status || true
 
-          echo
-          echo "Tailscale IPv4:"
+          echo "Final Tailscale IPv4:"
           tailscale ip -4 || true
-
-          echo
-          echo "Tailscale IPv6:"
-          tailscale ip -6 || true
-
-          echo
-          echo "Forwarding:"
-          sysctl net.ipv4.ip_forward || true
-          sysctl net.ipv6.conf.all.forwarding || true
