@@ -22,33 +22,56 @@ jobs:
       - name: Enable IP Forwarding
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           sudo sysctl -w net.ipv4.ip_forward=1
+
           echo "IPv4 forwarding:"
           sysctl net.ipv4.ip_forward
+
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+
           tags: tag:exit
           hostname: cynet-linux-exit
+
           version: latest
-          args: --advertise-routes=0.0.0.0/0 --accept-dns=false --ssh
+          use-cache: "false"
+
+          args: >-
+            --advertise-exit-node
+            --accept-dns=false
+
+
+      - name: Enable Tailscale SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Enabling Tailscale SSH..."
+          sudo tailscale set --ssh
+
+          echo "Tailscale SSH enabled."
+
 
       - name: Verify Tailscale
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           READY=false
+
           for i in {1..12}; do
             if tailscale status >/dev/null 2>&1; then
               READY=true
               echo "Tailscale is ready."
               break
             fi
+
             echo "Tailscale is not ready. Retry $i/12..."
             sleep 5
           done
@@ -58,11 +81,27 @@ jobs:
             exit 1
           fi
 
+          echo
+          echo "Tailscale version:"
+          tailscale version
+
+          echo
           echo "Tailscale IPv4:"
           tailscale ip -4
 
+          echo
           echo "Tailscale status:"
           tailscale status
+
+          echo
+          echo "Tailscale SSH:"
+          if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
+            echo "Enabled"
+          else
+            echo "ERROR: Tailscale SSH is not enabled."
+            exit 1
+          fi
+
 
       - name: Keep Exit Node Alive
         shell: bash
@@ -72,29 +111,66 @@ jobs:
           for i in {1..335}; do
             sleep 60
 
-            if tailscale status >/dev/null 2>&1; then
-              echo "[$i/335] Tailscale OK."
-              continue
+            # ========================================
+            # CHECK TAILSCALE
+            # ========================================
+
+            if ! tailscale status >/dev/null 2>&1; then
+              echo "[$i/335] WARNING: Tailscale appears unhealthy."
+              echo "Attempting full recovery..."
+
+              sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+              sudo tailscale up \
+                --advertise-exit-node \
+                --accept-dns=false \
+                --ssh \
+                --hostname=cynet-linux-exit \
+                || true
+
+              sleep 10
+
+              if tailscale status >/dev/null 2>&1; then
+                echo "[$i/335] Tailscale successfully recovered."
+              else
+                echo "[$i/335] WARNING: Tailscale recovery failed."
+              fi
             fi
 
-            echo "[$i/335] WARNING: Tailscale appears unhealthy. Reconnecting..."
-            sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-            tailscale up \
-              --advertise-routes=0.0.0.0/0 \
-              --accept-dns=false \
-              --ssh \
-              --hostname=cynet-linux-exit \
-              || true
+            # ========================================
+            # CHECK TAILSCALE SSH
+            # ========================================
 
-            sleep 10
+            if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
+              echo "[$i/335] Tailscale SSH OK."
+            else
+              echo "[$i/335] WARNING: Tailscale SSH is disabled."
+              echo "Re-enabling Tailscale SSH..."
+
+              sudo tailscale set --ssh || true
+
+              sleep 3
+
+              if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
+                echo "[$i/335] Tailscale SSH successfully recovered."
+              else
+                echo "[$i/335] WARNING: Failed to re-enable Tailscale SSH."
+              fi
+            fi
+
+
+            # ========================================
+            # FINAL STATUS
+            # ========================================
 
             if tailscale status >/dev/null 2>&1; then
-              echo "[$i/335] Tailscale successfully recovered."
+              echo "[$i/335] Exit Node healthy."
             else
-              echo "[$i/335] WARNING: Tailscale recovery attempt failed."
+              echo "[$i/335] WARNING: Exit Node still unhealthy."
             fi
           done
+
 
       - name: Final Tailscale Status
         if: always()
@@ -103,5 +179,18 @@ jobs:
           echo "Final Tailscale status:"
           tailscale status || true
 
+          echo
           echo "Final Tailscale IPv4:"
           tailscale ip -4 || true
+
+          echo
+          echo "Final Tailscale version:"
+          tailscale version || true
+
+          echo
+          echo "Final Tailscale SSH state:"
+          if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
+            echo "Enabled"
+          else
+            echo "Disabled"
+          fi
