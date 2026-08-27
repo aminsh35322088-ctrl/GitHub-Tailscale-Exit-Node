@@ -4,10 +4,15 @@ on:
   schedule:
     - cron: '17 */6 * * *'
   workflow_dispatch:
-
-concurrency:
-  group: tailscale-exit-node
-  cancel-in-progress: false
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: false
+        default: 'start'
+        type: choice
+        options:
+          - start
+          - stop
 
 permissions:
   contents: read
@@ -15,12 +20,144 @@ permissions:
 env:
   TAILSCALE_HOSTNAME: 'GitHub-Exit'
 
+concurrency:
+  group: tailscale-exit-node
+  cancel-in-progress: false
+
 jobs:
   exit-node:
+    if: ${{ github.event.inputs.action != 'stop' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
     steps:
+      - name: Check for Active Healthy Exit Node
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: tailscale-exit-node.yml
+          # Normal exit node duration is ~350 min. A run active beyond
+          # this is likely stale/stuck and can be replaced.
+          STALE_THRESHOLD_MINUTES: 420
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "DUPLICATE EXIT NODE DETECTION"
+          echo "=========================================="
+          echo "Time: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+
+          RUNS_API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs"
+          HEADERS=(
+            -H "Accept: application/vnd.github+json"
+            -H "Authorization: Bearer $GH_TOKEN"
+            -H "X-GitHub-Api-Version: 2022-11-28"
+          )
+
+          CURRENT_RUN_ID="${{ github.run_id }}"
+          NOW="$(date +%s)"
+
+          # Fetch recent runs with retries for API transient errors
+          RUNS_JSON=""
+          for ATTEMPT in 1 2 3; do
+            RUNS_JSON="$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=10" 2>/dev/null || true)"
+            if [ -n "$RUNS_JSON" ] && echo "$RUNS_JSON" | jq -e '.workflow_runs' >/dev/null 2>&1; then
+              break
+            fi
+            echo "API retry $ATTEMPT/3..."
+            sleep 3
+          done
+
+          # If API completely failed after retries, fail-safe: proceed with startup
+          # (better to risk duplicate than leave no exit node running)
+          if [ -z "$RUNS_JSON" ] || ! echo "$RUNS_JSON" | jq -e '.workflow_runs' >/dev/null 2>&1; then
+            echo "WARNING: GitHub API unreachable after 3 retries."
+            echo "Fail-safe: proceeding with exit node startup."
+            echo "=========================================="
+            exit 0
+          fi
+
+          # Find active (in_progress) runs of this workflow, excluding self
+          ACTIVE_RUNS="$(echo "$RUNS_JSON" | jq -r --arg self "$CURRENT_RUN_ID" '
+            [.workflow_runs[] |
+              select(.status == "in_progress" and (.id | tostring) != $self)]
+            | sort_by(.created_at) | reverse
+          ')"
+
+          ACTIVE_COUNT="$(echo "$ACTIVE_RUNS" | jq 'length')"
+
+          if [ "$ACTIVE_COUNT" -eq 0 ]; then
+            echo "No other active Exit Node runs found. Proceeding with startup."
+            echo "=========================================="
+            exit 0
+          fi
+
+          echo "Found $ACTIVE_COUNT other active run(s). Checking health..."
+
+          # Extract the most recent active run's data (no subshell)
+          MOST_RECENT_ID="$(echo "$ACTIVE_RUNS" | jq -r '.[0].id')"
+          MOST_RECENT_CREATED="$(echo "$ACTIVE_RUNS" | jq -r '.[0].created_at')"
+          MOST_RECENT_UPDATED="$(echo "$ACTIVE_RUNS" | jq -r '.[0].updated_at')"
+
+          CREATED_TS="$(date -d "$MOST_RECENT_CREATED" +%s 2>/dev/null || echo 0)"
+          UPDATED_TS="$(date -d "$MOST_RECENT_UPDATED" +%s 2>/dev/null || echo 0)"
+
+          if [ "$CREATED_TS" -gt 0 ]; then
+            AGE_MINUTES=$(( (NOW - CREATED_TS) / 60 ))
+          else
+            AGE_MINUTES=0
+          fi
+
+          if [ "$UPDATED_TS" -gt 0 ]; then
+            STALE_MINUTES=$(( (NOW - UPDATED_TS) / 60 ))
+          else
+            STALE_MINUTES=0
+          fi
+
+          echo "Most recent active run: $MOST_RECENT_ID"
+          echo "  Age: ${AGE_MINUTES}m, Last update: ${STALE_MINUTES}m ago"
+
+          # Decision: is the active run healthy?
+          if [ "$AGE_MINUTES" -lt "$STALE_THRESHOLD_MINUTES" ]; then
+            echo ""
+            echo "=========================================="
+            echo "SKIP: Healthy Exit Node run already exists."
+            echo "Run $MOST_RECENT_ID is active (age ${AGE_MINUTES}m < threshold ${STALE_THRESHOLD_MINUTES}m)."
+            echo "Skipping duplicate startup."
+            echo "=========================================="
+            exit 0
+          fi
+
+          echo "Run $MOST_RECENT_ID appears stale (age ${AGE_MINUTES}m >= threshold ${STALE_THRESHOLD_MINUTES}m)."
+
+          # Re-fetch to confirm staleness (avoid TOCTOU race)
+          sleep 2
+          RECHECK_JSON="$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=5" 2>/dev/null || true)"
+          if [ -n "$RECHECK_JSON" ]; then
+            RECHECK_STILL_ACTIVE="$(echo "$RECHECK_JSON" | jq -r --arg self "$CURRENT_RUN_ID" --arg threshold "$STALE_THRESHOLD_MINUTES" '
+              [.workflow_runs[] |
+                select(.status == "in_progress" and (.id | tostring) != $self)] |
+              sort_by(.created_at) | reverse | .[0] |
+              select(
+                ((now - (.created_at | fromdateiso8601)) / 60) < ($threshold | tonumber)
+              ) | .id
+            ' 2>/dev/null || true)"
+
+            if [ -n "$RECHECK_STILL_ACTIVE" ]; then
+              echo ""
+              echo "=========================================="
+              echo "SKIP: Healthy Exit Node run $RECHECK_STILL_ACTIVE confirmed on recheck."
+              echo "The previous run recovered. Skipping duplicate startup."
+              echo "=========================================="
+              exit 0
+            fi
+          fi
+
+          echo ""
+          echo "No healthy Exit Node run detected. Proceeding with startup."
+          echo "=========================================="
+
       - name: Enable IP Forwarding
         shell: bash
         run: |
@@ -98,19 +235,92 @@ jobs:
             exit 1
           fi
 
+      - name: Verify Exit Node State
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "========================================"
+          echo "VERIFYING EXIT NODE STATE"
+          echo "========================================"
+
+          TS_IP="$(tailscale ip -4)"
+          echo "Exit Node IP: $TS_IP"
+
+          # Check 1: Verify exit node tag is present
+          echo ""
+          echo "--- Check 1: Exit Node Tag ---"
+          if tailscale status --json | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
+            echo "PASS: tag:exit is present on this node."
+          else
+            echo "FAIL: tag:exit not found on this node."
+            echo "Attempting to re-advertise exit node..."
+            sudo tailscale set --advertise-exit-node
+            sleep 5
+            if tailscale status --json | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
+              echo "RECOVERED: tag:exit now present after re-advertisement."
+            else
+              echo "ERROR: Could not restore tag:exit. Exit node may not function."
+              exit 1
+            fi
+          fi
+
+          # Check 2: Verify exit node is advertised in status
+          echo ""
+          echo "--- Check 2: Exit Node Advertisement ---"
+          TS_STATUS_JSON="$(tailscale status --json)"
+          EXPECTED_ROUTES="$(echo "$TS_STATUS_JSON" | jq -r '.Self.ExpectedRoutes // [] | length')"
+          echo "Expected routes count: $EXPECTED_ROUTES"
+
+          # Check 3: Verify IP forwarding is active (required for exit node)
+          echo ""
+          echo "--- Check 3: IP Forwarding ---"
+          if [ "$(sysctl -n net.ipv4.ip_forward)" = "1" ]; then
+            echo "PASS: IPv4 forwarding is enabled."
+          else
+            echo "FAIL: IPv4 forwarding is disabled."
+            exit 1
+          fi
+
+          # Check 4: Quick dataplane connectivity test (public IP check)
+          echo ""
+          echo "--- Check 4: Dataplane Connectivity ---"
+          PUBLIC_IP="$(curl -s --max-time 10 https://ifconfig.me 2>/dev/null || true)"
+          if [ -n "$PUBLIC_IP" ]; then
+            echo "PASS: Public IP reachable: $PUBLIC_IP"
+            echo "Exit Node IP: $TS_IP"
+            if [ "$PUBLIC_IP" != "$TS_IP" ]; then
+              echo "NOTE: Public IP differs from Tailscale IP (expected if not using this as exit)."
+            fi
+          else
+            echo "WARNING: Could not reach public IP. This may indicate dataplane issue."
+            echo "Continuing anyway - the exit node may still function for Tailscale peers."
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "EXIT NODE STATE VERIFICATION COMPLETE"
+          echo "========================================"
+
       - name: Keep Exit Node Alive
         shell: bash
         run: |
           set -u
           SYSCTL_FILE="/etc/sysctl.d/99-tailscale.conf"
+          HEALTH_CHECK_FAILURES=0
+          MAX_HEALTH_FAILURES=3
+
           for i in {1..335}; do
             sleep 60
+
+            # --- IP Forwarding Check ---
             if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ] || [ "$(sysctl -n net.ipv6.conf.all.forwarding)" != "1" ]; then
-              echo "[$i/335] WARNING: IP forwarding is disabled."
+              echo "[$i/335] WARNING: IP forwarding is disabled. Restoring..."
               sudo sysctl -p "$SYSCTL_FILE" || true
             fi
+
+            # --- Tailscale Health Check ---
             if ! tailscale status >/dev/null 2>&1; then
-              echo "[$i/335] WARNING: Tailscale appears unhealthy."
+              echo "[$i/335] WARNING: Tailscale is unreachable. Attempting recovery..."
               sudo sysctl -p "$SYSCTL_FILE" || true
               sudo tailscale up \
                 --advertise-exit-node \
@@ -119,39 +329,76 @@ jobs:
                 --hostname="$TAILSCALE_HOSTNAME" \
                 || true
               sleep 10
-            fi
-            if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
-              echo "[$i/335] Tailscale SSH OK."
+
+              # Verify recovery
+              if ! tailscale status >/dev/null 2>&1; then
+                HEALTH_CHECK_FAILURES=$((HEALTH_CHECK_FAILURES + 1))
+                echo "[$i/335] CRITICAL: Tailscale recovery failed ($HEALTH_CHECK_FAILURES/$MAX_HEALTH_FAILURES)."
+                if [ "$HEALTH_CHECK_FAILURES" -ge "$MAX_HEALTH_FAILURES" ]; then
+                  echo "[$i/335] FATAL: Too many consecutive health failures. Exiting to trigger restart."
+                  exit 1
+                fi
+                continue
+              else
+                echo "[$i/335] Tailscale recovered successfully."
+                HEALTH_CHECK_FAILURES=0
+              fi
             else
+              HEALTH_CHECK_FAILURES=0
+            fi
+
+            # --- SSH Check ---
+            if ! sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
+              echo "[$i/335] WARNING: Tailscale SSH is disabled. Re-enabling..."
               sudo tailscale set --ssh || true
             fi
-            if tailscale status >/dev/null 2>&1; then
-              echo "[$i/335] Exit Node healthy."
-            else
-              echo "[$i/335] WARNING: Exit Node still unhealthy."
+
+            # --- Exit Node Tag Check ---
+            if ! tailscale status --json | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
+              echo "[$i/335] WARNING: Exit node tag missing. Re-advertising..."
+              sudo tailscale set --advertise-exit-node || true
             fi
+
+            echo "[$i/335] Exit Node healthy. (failures=$HEALTH_CHECK_FAILURES)"
           done
 
-      - name: Final Tailscale Status
+      - name: Graceful Shutdown
         if: always()
         shell: bash
         run: |
-          echo "Final Tailscale status:"
-          tailscale status || true
-          echo "Final Tailscale IPv4:"
-          tailscale ip -4 || true
-          echo "Final Tailscale IPv6:"
-          tailscale ip -6 || true
-          echo "Final Tailscale hostname:"
-          echo "$TAILSCALE_HOSTNAME"
-          echo "Final Tailscale version:"
-          tailscale version || true
-          echo "Final IP forwarding state:"
-          sysctl net.ipv4.ip_forward || true
-          sysctl net.ipv6.conf.all.forwarding || true
-          echo "Final Tailscale SSH state:"
-          if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
-            echo "Enabled"
+          echo "=========================================="
+          echo "GRACEFUL SHUTDOWN"
+          echo "=========================================="
+          echo "Disabling exit node advertisement..."
+
+          # Use documented flag to disable exit node advertisement
+          if sudo tailscale set --advertise-exit-node=false; then
+            echo "Exit node advertisement disabled successfully."
           else
-            echo "Disabled"
+            echo "ERROR: Failed to disable exit node advertisement."
+            echo "The exit node may remain advertised until Tailscale coordination server detects the node is offline."
           fi
+
+          # Verify the state change
+          sleep 5
+          echo ""
+          echo "Verifying shutdown state..."
+
+          TS_JSON="$(tailscale status --json 2>/dev/null || true)"
+          if [ -n "$TS_JSON" ]; then
+            # Check if exit node tag is still present
+            if echo "$TS_JSON" | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
+              echo "WARNING: tag:exit still present after disable. Retrying..."
+              sudo tailscale set --advertise-exit-node=false || true
+              sleep 3
+            fi
+
+            # Check self status
+            echo "Final Tailscale status:"
+            tailscale status || true
+          else
+            echo "Tailscale not reachable for final status check."
+          fi
+
+          echo ""
+          echo "Graceful shutdown complete."

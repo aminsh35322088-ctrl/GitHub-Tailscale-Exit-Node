@@ -25,7 +25,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WORKFLOW: tailscale-exit-node.yml
-          QUEUED_TIMEOUT_MINUTES: 5
+          QUEUED_TIMEOUT_MINUTES: 10
+          # Normal Exit Node runtime is 350 min. A run that is both very old
+          # and has not updated recently is treated as stuck.
+          STALE_RUN_MINUTES: 420
+          STALE_UPDATE_MINUTES: 15
         run: |
           set -euo pipefail
 
@@ -34,6 +38,7 @@ jobs:
           echo "=========================================="
           echo "Repository: $REPO"
           echo "Workflow:   $WORKFLOW"
+          echo "Time:       $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
 
           RUNS_API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs"
           DISPATCH_API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/dispatches"
@@ -52,21 +57,112 @@ jobs:
           ACTIVE_COUNT="$(jq '[.workflow_runs[] | select(.status == "in_progress")] | length' <<<"$RUNS_JSON")"
           QUEUED_COUNT="$(jq '[.workflow_runs[] | select(.status == "queued")] | length' <<<"$RUNS_JSON")"
           WAITING_COUNT="$(jq '[.workflow_runs[] | select(.status == "waiting" or .status == "requested" or .status == "pending")] | length' <<<"$RUNS_JSON")"
+          FAILED_COUNT="$(jq '[.workflow_runs[] | select(.conclusion == "failure" and .status == "completed")] | length' <<<"$RUNS_JSON")"
 
           echo "Active (in_progress): $ACTIVE_COUNT"
           echo "Queued:               $QUEUED_COUNT"
           echo "Waiting/requested:    $WAITING_COUNT"
+          echo "Recent failures:      $FAILED_COUNT"
 
-          # A real in-progress Exit Node run is authoritative. Never dispatch a second one.
+          # --- Case 1: Exit Node is running ---
           if [ "$ACTIVE_COUNT" -gt 0 ]; then
-            echo "Exit Node workflow is currently running."
+            ACTIVE_RUN_ID="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .id' <<<"$RUNS_JSON" | head -1)"
+            ACTIVE_RUN_CREATED="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .created_at' <<<"$RUNS_JSON" | head -1)"
+            ACTIVE_RUN_UPDATED="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .updated_at' <<<"$RUNS_JSON" | head -1)"
+
+            NOW="$(date +%s)"
+            CREATED_TS="$(date -d "$ACTIVE_RUN_CREATED" +%s 2>/dev/null || echo 0)"
+            UPDATED_TS="$(date -d "$ACTIVE_RUN_UPDATED" +%s 2>/dev/null || echo 0)"
+
+            if [ "$CREATED_TS" -gt 0 ]; then
+              AGE_SECONDS=$((NOW - CREATED_TS))
+              AGE_MINUTES=$((AGE_SECONDS / 60))
+            else
+              AGE_MINUTES=0
+            fi
+
+            if [ "$UPDATED_TS" -gt 0 ]; then
+              STALE_SECONDS=$((NOW - UPDATED_TS))
+              STALE_MINUTES=$((STALE_SECONDS / 60))
+            else
+              STALE_MINUTES=0
+            fi
+
+            echo "Active run $ACTIVE_RUN_ID: age=${AGE_MINUTES}m, last_update=${STALE_MINUTES}m ago"
+
+            # A long-running job is not automatically unhealthy. Require BOTH
+            # an overdue age and a stale GitHub update timestamp before treating
+            # the run as stuck. This avoids replacing a healthy long run merely
+            # because it has a long lifetime.
+            STALE_THRESHOLD=$((STALE_RUN_MINUTES * 3 / 2))
+            if [ "$AGE_MINUTES" -ge "$STALE_THRESHOLD" ] && [ "$STALE_MINUTES" -ge "$STALE_UPDATE_MINUTES" ]; then
+              echo "WARNING: Active run $ACTIVE_RUN_ID is stale: age=${AGE_MINUTES}m, last_update=${STALE_MINUTES}m."
+              echo "Cancelling stale run before dispatching replacement."
+
+              CANCEL_CODE="$(curl -sS -o /tmp/cancel-response.json -w "%{http_code}" \
+                -X POST "${HEADERS[@]}" \
+                "$RUNS_API/$ACTIVE_RUN_ID/cancel")"
+
+              case "$CANCEL_CODE" in
+                202|409|404)
+                  echo "Stale run cancel request accepted/settled (HTTP $CANCEL_CODE)."
+                  ;;
+                *)
+                  echo "ERROR: Failed to cancel stale run $ACTIVE_RUN_ID (HTTP $CANCEL_CODE)."
+                  cat /tmp/cancel-response.json || true
+                  exit 1
+                  ;;
+              esac
+
+              # Wait until the old run is no longer active before dispatching.
+              # This is the critical no-overlap guarantee: concurrency=false does
+              # not cancel a running run, so replacement must not be dispatched
+              # until the stale run has actually left in_progress.
+              CANCELLED=0
+              for ATTEMPT in {1..12}; do
+                sleep 5
+                CHECK_JSON="$(get_runs)"
+                STILL_ACTIVE="$(jq -r --argjson id "$ACTIVE_RUN_ID" '[.workflow_runs[] | select(.id == $id and .status == "in_progress")] | length' <<<"$CHECK_JSON")"
+                if [ "$STILL_ACTIVE" -eq 0 ]; then
+                  CANCELLED=1
+                  echo "Stale run $ACTIVE_RUN_ID is no longer in progress."
+                  break
+                fi
+                echo "Waiting for stale run cancellation... attempt $ATTEMPT/12"
+              done
+
+              if [ "$CANCELLED" -ne 1 ]; then
+                echo "ERROR: Stale run $ACTIVE_RUN_ID is still active after 60 seconds."
+                echo "Not dispatching a replacement to avoid overlap."
+                exit 1
+              fi
+
+              HTTP_CODE="$(curl -sS -o /tmp/dispatch-response.json -w "%{http_code}" \
+                -X POST "${HEADERS[@]}" \
+                -H 'Content-Type: application/json' \
+                "$DISPATCH_API" \
+                -d '{"ref":"main"}')"
+
+              if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "200" ]; then
+                echo "Replacement dispatch accepted (HTTP $HTTP_CODE)."
+              else
+                echo "ERROR: Failed to dispatch replacement (HTTP $HTTP_CODE)."
+                cat /tmp/dispatch-response.json || true
+                exit 1
+              fi
+              exit 0
+            fi
+
+            # Run is active and not proven stale. GitHub concurrency guarantees
+            # at most one running workflow in this concurrency group.
+            echo "Exit Node run is active and not proven stale. No replacement will be dispatched."
             exit 0
           fi
 
           NOW="$(date +%s)"
           STALE_FOUND=0
 
-          # Only queued runs older than the timeout are considered stuck.
+          # --- Case 2: Cancel stale queued runs ---
           while IFS=$'\t' read -r RUN_ID CREATED_AT; do
             [ -n "${RUN_ID:-}" ] || continue
 
@@ -111,7 +207,7 @@ jobs:
             fi
           fi
 
-          # Do not stack another run behind a fresh queued run. The next watchdog cycle will retry.
+          # Do not stack another run behind a fresh queued run.
           if [ "$QUEUED_COUNT" -gt 0 ]; then
             echo "A non-stale Exit Node run is still queued."
             echo "No duplicate dispatch will be created."
@@ -129,7 +225,7 @@ jobs:
 
           echo "Dispatch HTTP status: $HTTP_CODE"
 
-          if [ "$HTTP_CODE" != "204" ]; then
+          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
             echo "ERROR: Failed to dispatch Exit Node workflow."
             cat /tmp/dispatch-response.json || true
             exit 1
@@ -152,7 +248,7 @@ jobs:
           done
 
           if [ "$FOUND_RUN" -eq 0 ]; then
-            echo "WARNING: GitHub returned 204 but the new run was not visible after 30 seconds."
+            echo "WARNING: GitHub returned success but the new run was not visible after 30 seconds."
             echo "The dispatch was accepted; the next watchdog cycle will verify/recover again."
           else
             echo "Exit Node recovery requested successfully."
