@@ -12,13 +12,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  TAILSCALE_HOSTNAME: '⚡GitHub-Exit⚡'
+
 jobs:
   exit-node:
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
     steps:
-
       # ========================================
       # ENABLE IP FORWARDING
       # Official Tailscale Linux configuration
@@ -49,7 +51,6 @@ jobs:
           echo "IPv4 forwarding: ENABLED"
           echo "IPv6 forwarding: ENABLED"
 
-
       # ========================================
       # CONNECT TAILSCALE
       # ========================================
@@ -61,7 +62,7 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
 
           tags: tag:exit
-          hostname: cynet-linux-exit
+          hostname: ${{ env.TAILSCALE_HOSTNAME }}
 
           version: latest
           use-cache: "false"
@@ -69,7 +70,6 @@ jobs:
           args: >-
             --advertise-exit-node
             --accept-dns=false
-
 
       # ========================================
       # ENABLE TAILSCALE SSH
@@ -90,7 +90,6 @@ jobs:
             echo "ERROR: Failed to enable Tailscale SSH."
             exit 1
           fi
-
 
       # ========================================
       # VERIFY TAILSCALE
@@ -120,12 +119,19 @@ jobs:
           fi
 
           echo
+          echo "Tailscale hostname: $TAILSCALE_HOSTNAME"
+
+          echo
           echo "Tailscale version:"
           tailscale version
 
           echo
           echo "Tailscale IPv4:"
           tailscale ip -4
+
+          echo
+          echo "Tailscale IPv6:"
+          tailscale ip -6 || true
 
           echo
           echo "Tailscale status:"
@@ -147,7 +153,6 @@ jobs:
             echo "ERROR: Tailscale SSH is not enabled."
             exit 1
           fi
-
 
       # ========================================
       # KEEP EXIT NODE ALIVE
@@ -183,7 +188,6 @@ jobs:
               fi
             fi
 
-
             # ------------------------------------
             # CHECK TAILSCALE
             # ------------------------------------
@@ -199,7 +203,7 @@ jobs:
                 --advertise-exit-node \
                 --accept-dns=false \
                 --ssh \
-                --hostname=cynet-linux-exit \
+                --hostname="$TAILSCALE_HOSTNAME" \
                 || true
 
               sleep 10
@@ -210,7 +214,6 @@ jobs:
                 echo "[$i/335] WARNING: Tailscale recovery failed."
               fi
             fi
-
 
             # ------------------------------------
             # CHECK TAILSCALE SSH
@@ -233,7 +236,6 @@ jobs:
               fi
             fi
 
-
             # ------------------------------------
             # FINAL HEALTH STATUS
             # ------------------------------------
@@ -244,7 +246,6 @@ jobs:
               echo "[$i/335] WARNING: Exit Node still unhealthy."
             fi
           done
-
 
       # ========================================
       # FINAL STATUS
@@ -260,6 +261,14 @@ jobs:
           echo
           echo "Final Tailscale IPv4:"
           tailscale ip -4 || true
+
+          echo
+          echo "Final Tailscale IPv6:"
+          tailscale ip -6 || true
+
+          echo
+          echo "Final Tailscale hostname:"
+          echo "$TAILSCALE_HOSTNAME"
 
           echo
           echo "Final Tailscale version:"
