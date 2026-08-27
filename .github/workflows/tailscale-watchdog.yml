@@ -25,7 +25,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WORKFLOW: tailscale-exit-node.yml
-          QUEUED_TIMEOUT_MINUTES: 5
+          QUEUED_TIMEOUT_MINUTES: 10
         run: |
           set -euo pipefail
 
@@ -34,6 +34,7 @@ jobs:
           echo "=========================================="
           echo "Repository: $REPO"
           echo "Workflow:   $WORKFLOW"
+          echo "Time:       $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
 
           RUNS_API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs"
           DISPATCH_API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/dispatches"
@@ -52,21 +53,25 @@ jobs:
           ACTIVE_COUNT="$(jq '[.workflow_runs[] | select(.status == "in_progress")] | length' <<<"$RUNS_JSON")"
           QUEUED_COUNT="$(jq '[.workflow_runs[] | select(.status == "queued")] | length' <<<"$RUNS_JSON")"
           WAITING_COUNT="$(jq '[.workflow_runs[] | select(.status == "waiting" or .status == "requested" or .status == "pending")] | length' <<<"$RUNS_JSON")"
+          FAILED_COUNT="$(jq '[.workflow_runs[] | select(.conclusion == "failure" and .status == "completed")] | length' <<<"$RUNS_JSON")"
 
           echo "Active (in_progress): $ACTIVE_COUNT"
           echo "Queued:               $QUEUED_COUNT"
           echo "Waiting/requested:    $WAITING_COUNT"
+          echo "Recent failures:      $FAILED_COUNT"
 
-          # A real in-progress Exit Node run is authoritative. Never dispatch a second one.
+          # --- Case 1: Exit Node is running ---
           if [ "$ACTIVE_COUNT" -gt 0 ]; then
-            echo "Exit Node workflow is currently running."
+            ACTIVE_RUN_ID="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .id' <<<"$RUNS_JSON" | head -1)"
+            ACTIVE_RUN_AGE="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .created_at' <<<"$RUNS_JSON" | head -1)"
+            echo "Exit Node is running (run $ACTIVE_RUN_ID, started $ACTIVE_RUN_AGE)."
             exit 0
           fi
 
           NOW="$(date +%s)"
           STALE_FOUND=0
 
-          # Only queued runs older than the timeout are considered stuck.
+          # --- Case 2: Cancel stale queued runs ---
           while IFS=$'\t' read -r RUN_ID CREATED_AT; do
             [ -n "${RUN_ID:-}" ] || continue
 
@@ -111,7 +116,7 @@ jobs:
             fi
           fi
 
-          # Do not stack another run behind a fresh queued run. The next watchdog cycle will retry.
+          # Do not stack another run behind a fresh queued run.
           if [ "$QUEUED_COUNT" -gt 0 ]; then
             echo "A non-stale Exit Node run is still queued."
             echo "No duplicate dispatch will be created."

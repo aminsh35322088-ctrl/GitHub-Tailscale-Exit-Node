@@ -4,10 +4,15 @@ on:
   schedule:
     - cron: '17 */6 * * *'
   workflow_dispatch:
-
-concurrency:
-  group: tailscale-exit-node
-  cancel-in-progress: false
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: false
+        default: 'start'
+        type: choice
+        options:
+          - start
+          - stop
 
 permissions:
   contents: read
@@ -15,8 +20,13 @@ permissions:
 env:
   TAILSCALE_HOSTNAME: 'GitHub-Exit'
 
+concurrency:
+  group: tailscale-exit-node
+  cancel-in-progress: true
+
 jobs:
   exit-node:
+    if: ${{ github.event.inputs.action != 'stop' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
@@ -98,19 +108,43 @@ jobs:
             exit 1
           fi
 
+      - name: Verify Exit Node Reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Verifying exit node is advertised and reachable..."
+          TS_IP="$(tailscale ip -4)"
+          echo "Exit Node IP: $TS_IP"
+
+          if tailscale status --json | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
+            echo "Exit node tag verified."
+          else
+            echo "WARNING: tag:exit not found on self. Checking status..."
+            tailscale status
+          fi
+
+          echo "Exit node is operational."
+
       - name: Keep Exit Node Alive
         shell: bash
         run: |
           set -u
           SYSCTL_FILE="/etc/sysctl.d/99-tailscale.conf"
+          HEALTH_CHECK_FAILURES=0
+          MAX_HEALTH_FAILURES=3
+
           for i in {1..335}; do
             sleep 60
+
+            # --- IP Forwarding Check ---
             if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ] || [ "$(sysctl -n net.ipv6.conf.all.forwarding)" != "1" ]; then
-              echo "[$i/335] WARNING: IP forwarding is disabled."
+              echo "[$i/335] WARNING: IP forwarding is disabled. Restoring..."
               sudo sysctl -p "$SYSCTL_FILE" || true
             fi
+
+            # --- Tailscale Health Check ---
             if ! tailscale status >/dev/null 2>&1; then
-              echo "[$i/335] WARNING: Tailscale appears unhealthy."
+              echo "[$i/335] WARNING: Tailscale is unreachable. Attempting recovery..."
               sudo sysctl -p "$SYSCTL_FILE" || true
               sudo tailscale up \
                 --advertise-exit-node \
@@ -119,39 +153,52 @@ jobs:
                 --hostname="$TAILSCALE_HOSTNAME" \
                 || true
               sleep 10
-            fi
-            if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
-              echo "[$i/335] Tailscale SSH OK."
+
+              # Verify recovery
+              if ! tailscale status >/dev/null 2>&1; then
+                HEALTH_CHECK_FAILURES=$((HEALTH_CHECK_FAILURES + 1))
+                echo "[$i/335] CRITICAL: Tailscale recovery failed ($HEALTH_CHECK_FAILURES/$MAX_HEALTH_FAILURES)."
+                if [ "$HEALTH_CHECK_FAILURES" -ge "$MAX_HEALTH_FAILURES" ]; then
+                  echo "[$i/335] FATAL: Too many consecutive health failures. Exiting to trigger restart."
+                  exit 1
+                fi
+                continue
+              else
+                echo "[$i/335] Tailscale recovered successfully."
+                HEALTH_CHECK_FAILURES=0
+              fi
             else
+              HEALTH_CHECK_FAILURES=0
+            fi
+
+            # --- SSH Check ---
+            if ! sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
+              echo "[$i/335] WARNING: Tailscale SSH is disabled. Re-enabling..."
               sudo tailscale set --ssh || true
             fi
-            if tailscale status >/dev/null 2>&1; then
-              echo "[$i/335] Exit Node healthy."
-            else
-              echo "[$i/335] WARNING: Exit Node still unhealthy."
+
+            # --- Exit Node Tag Check ---
+            if ! tailscale status --json | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
+              echo "[$i/335] WARNING: Exit node tag missing. Re-advertising..."
+              sudo tailscale set --advertise-exit-node || true
             fi
+
+            echo "[$i/335] Exit Node healthy. (failures=$HEALTH_CHECK_FAILURES)"
           done
 
-      - name: Final Tailscale Status
+      - name: Graceful Shutdown
         if: always()
         shell: bash
         run: |
-          echo "Final Tailscale status:"
+          echo "=========================================="
+          echo "GRACEFUL SHUTDOWN"
+          echo "=========================================="
+          echo "Removing exit node advertisement..."
+
+          sudo tailscale set --reset || true
+
+          sleep 5
+
+          echo "Final status:"
           tailscale status || true
-          echo "Final Tailscale IPv4:"
-          tailscale ip -4 || true
-          echo "Final Tailscale IPv6:"
-          tailscale ip -6 || true
-          echo "Final Tailscale hostname:"
-          echo "$TAILSCALE_HOSTNAME"
-          echo "Final Tailscale version:"
-          tailscale version || true
-          echo "Final IP forwarding state:"
-          sysctl net.ipv4.ip_forward || true
-          sysctl net.ipv6.conf.all.forwarding || true
-          echo "Final Tailscale SSH state:"
-          if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
-            echo "Enabled"
-          else
-            echo "Disabled"
-          fi
+          echo "Exit node deregistered."
