@@ -2,7 +2,7 @@ name: Tailscale Exit Node Watchdog
 
 on:
   schedule:
-    - cron: '7,22,37,52 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -11,20 +11,21 @@ permissions:
 
 concurrency:
   group: tailscale-exit-node-watchdog
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   watchdog:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Check Exit Node Workflow
+      - name: Check and recover Exit Node
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WORKFLOW: tailscale-exit-node.yml
-          QUEUED_TIMEOUT_MINUTES: 10
+          QUEUED_TIMEOUT_MINUTES: 5
         run: |
           set -euo pipefail
 
@@ -42,90 +43,117 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28"
           )
 
-          RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=20")
+          get_runs() {
+            curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=20"
+          }
 
-          ACTIVE_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "in_progress")] | length')
-          QUEUED_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "queued")] | length')
-          WAITING_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "waiting" or .status == "requested" or .status == "pending")] | length')
+          RUNS_JSON="$(get_runs)"
+
+          ACTIVE_COUNT="$(jq '[.workflow_runs[] | select(.status == "in_progress")] | length' <<<"$RUNS_JSON")"
+          QUEUED_COUNT="$(jq '[.workflow_runs[] | select(.status == "queued")] | length' <<<"$RUNS_JSON")"
+          WAITING_COUNT="$(jq '[.workflow_runs[] | select(.status == "waiting" or .status == "requested" or .status == "pending")] | length' <<<"$RUNS_JSON")"
 
           echo "Active (in_progress): $ACTIVE_COUNT"
           echo "Queued:               $QUEUED_COUNT"
           echo "Waiting/requested:    $WAITING_COUNT"
 
+          # A real in-progress Exit Node run is authoritative. Never dispatch a second one.
           if [ "$ACTIVE_COUNT" -gt 0 ]; then
             echo "Exit Node workflow is currently running."
             exit 0
           fi
 
-          NOW=$(date +%s)
+          NOW="$(date +%s)"
           STALE_FOUND=0
 
+          # Only queued runs older than the timeout are considered stuck.
           while IFS=$'\t' read -r RUN_ID CREATED_AT; do
-            [ -n "$RUN_ID" ] || continue
+            [ -n "${RUN_ID:-}" ] || continue
 
-            CREATED_TS=$(date -d "$CREATED_AT" +%s 2>/dev/null || echo 0)
+            CREATED_TS="$(date -d "$CREATED_AT" +%s 2>/dev/null || echo 0)"
+            if [ "$CREATED_TS" -le 0 ]; then
+              echo "WARNING: Could not parse creation time for queued run $RUN_ID"
+              continue
+            fi
+
             AGE_SECONDS=$((NOW - CREATED_TS))
             AGE_MINUTES=$((AGE_SECONDS / 60))
-
             echo "Queued run $RUN_ID age: ${AGE_MINUTES}m"
 
-            if [ "$CREATED_TS" -gt 0 ] && [ "$AGE_SECONDS" -ge $((QUEUED_TIMEOUT_MINUTES * 60)) ]; then
+            if [ "$AGE_SECONDS" -ge $((QUEUED_TIMEOUT_MINUTES * 60)) ]; then
               echo "Cancelling stale queued run: $RUN_ID"
-
-              HTTP_CODE=$(curl -sS -o /tmp/cancel-response.json \
-                -w "%{http_code}" \
-                -X POST \
-                "${HEADERS[@]}" \
-                "$RUNS_API/$RUN_ID/cancel")
-
+              HTTP_CODE="$(curl -sS -o /tmp/cancel-response.json -w "%{http_code}" \
+                -X POST "${HEADERS[@]}" "$RUNS_API/$RUN_ID/cancel")"
               echo "Cancel HTTP status: $HTTP_CODE"
 
-              if [ "$HTTP_CODE" != "202" ] && [ "$HTTP_CODE" != "409" ] && [ "$HTTP_CODE" != "404" ]; then
-                echo "ERROR: Failed to cancel stale run $RUN_ID"
-                cat /tmp/cancel-response.json || true
-                exit 1
-              fi
-
-              STALE_FOUND=1
+              case "$HTTP_CODE" in
+                202|409|404) STALE_FOUND=1 ;;
+                *)
+                  echo "ERROR: Failed to cancel stale run $RUN_ID"
+                  cat /tmp/cancel-response.json || true
+                  exit 1
+                  ;;
+              esac
             fi
-          done < <(echo "$RUNS_JSON" | jq -r '.workflow_runs[] | select(.status == "queued") | [.id, .created_at] | @tsv')
+          done < <(jq -r '.workflow_runs[] | select(.status == "queued") | [.id, .created_at] | @tsv' <<<"$RUNS_JSON")
 
+          # Re-read state after stale-run cleanup.
           if [ "$STALE_FOUND" -eq 1 ]; then
             sleep 3
-            RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=20")
-            ACTIVE_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "in_progress")] | length')
-            QUEUED_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "queued")] | length')
+            RUNS_JSON="$(get_runs)"
+            ACTIVE_COUNT="$(jq '[.workflow_runs[] | select(.status == "in_progress")] | length' <<<"$RUNS_JSON")"
+            QUEUED_COUNT="$(jq '[.workflow_runs[] | select(.status == "queued")] | length' <<<"$RUNS_JSON")"
+            echo "After cleanup - Active: $ACTIVE_COUNT, Queued: $QUEUED_COUNT"
+
+            if [ "$ACTIVE_COUNT" -gt 0 ]; then
+              echo "An Exit Node run became active during cleanup."
+              exit 0
+            fi
           fi
 
-          if [ "$ACTIVE_COUNT" -gt 0 ]; then
-            echo "An Exit Node run became active during cleanup."
-            exit 0
-          fi
-
+          # Do not stack another run behind a fresh queued run. The next watchdog cycle will retry.
           if [ "$QUEUED_COUNT" -gt 0 ]; then
             echo "A non-stale Exit Node run is still queued."
-            echo "Waiting for GitHub Actions concurrency instead of creating another run."
+            echo "No duplicate dispatch will be created."
             exit 0
           fi
 
-          echo "No active or blocked Exit Node run found."
+          echo "No active or healthy queued Exit Node run found."
           echo "Starting a new Exit Node workflow..."
 
-          HTTP_CODE=$(curl -sS -o /tmp/dispatch-response.json \
-            -w "%{http_code}" \
-            -X POST \
-            "${HEADERS[@]}" \
+          HTTP_CODE="$(curl -sS -o /tmp/dispatch-response.json -w "%{http_code}" \
+            -X POST "${HEADERS[@]}" \
+            -H 'Content-Type: application/json' \
             "$DISPATCH_API" \
-            -d '{"ref":"main"}')
+            -d '{"ref":"main"}')"
 
           echo "Dispatch HTTP status: $HTTP_CODE"
 
-          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
+          if [ "$HTTP_CODE" != "204" ]; then
             echo "ERROR: Failed to dispatch Exit Node workflow."
             cat /tmp/dispatch-response.json || true
-            echo
-            echo "The watchdog now uses GITHUB_TOKEN with actions: write permission."
             exit 1
           fi
 
-          echo "Exit Node workflow dispatch requested successfully."
+          echo "Dispatch accepted. Verifying that GitHub created the run..."
+
+          FOUND_RUN=0
+          for ATTEMPT in {1..6}; do
+            sleep 5
+            CHECK_JSON="$(get_runs)"
+            if jq -e --argjson before_count "$(jq '.workflow_runs | length' <<<"$RUNS_JSON")" \
+              '.workflow_runs | length > $before_count' >/dev/null 2>&1 <<<"$CHECK_JSON"; then
+              FOUND_RUN=1
+              echo "New Exit Node workflow run detected."
+              jq -r '.workflow_runs[] | [.id, .status, (.conclusion // "")] | @tsv' <<<"$CHECK_JSON" | head -5
+              break
+            fi
+            echo "Waiting for dispatched run... attempt $ATTEMPT/6"
+          done
+
+          if [ "$FOUND_RUN" -eq 0 ]; then
+            echo "WARNING: GitHub returned 204 but the new run was not visible after 30 seconds."
+            echo "The dispatch was accepted; the next watchdog cycle will verify/recover again."
+          else
+            echo "Exit Node recovery requested successfully."
+          fi
