@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  TAILSCALE_HOSTNAME: '⚡GitHub-Exit⚡'
+  TAILSCALE_HOSTNAME: 'GitHub-Exit'
 
 jobs:
   exit-node:
@@ -21,69 +21,40 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      # ========================================
-      # ENABLE IP FORWARDING
-      # Official Tailscale Linux configuration
-      # ========================================
-
       - name: Enable IP Forwarding
         shell: bash
         run: |
           set -euo pipefail
-
           SYSCTL_FILE="/etc/sysctl.d/99-tailscale.conf"
-
           echo "Configuring IP forwarding..."
-
           sudo tee "$SYSCTL_FILE" >/dev/null <<'EOF'
           net.ipv4.ip_forward = 1
           net.ipv6.conf.all.forwarding = 1
           EOF
-
           sudo sysctl -p "$SYSCTL_FILE"
-
-          echo
-          echo "Verifying IP forwarding..."
-
           test "$(sysctl -n net.ipv4.ip_forward)" = "1"
           test "$(sysctl -n net.ipv6.conf.all.forwarding)" = "1"
-
           echo "IPv4 forwarding: ENABLED"
           echo "IPv6 forwarding: ENABLED"
-
-      # ========================================
-      # CONNECT TAILSCALE
-      # ========================================
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-
           tags: tag:exit
           hostname: ${{ env.TAILSCALE_HOSTNAME }}
-
           version: latest
           use-cache: "false"
-
           args: >-
             --advertise-exit-node
             --accept-dns=false
-
-      # ========================================
-      # ENABLE TAILSCALE SSH
-      # ========================================
 
       - name: Enable Tailscale SSH
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Enabling Tailscale SSH..."
-
           sudo tailscale set --ssh
-
           if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
             echo "Tailscale SSH enabled."
           else
@@ -91,62 +62,35 @@ jobs:
             exit 1
           fi
 
-      # ========================================
-      # VERIFY TAILSCALE
-      # ========================================
-
       - name: Verify Tailscale
         shell: bash
         run: |
           set -euo pipefail
-
           READY=false
-
           for i in {1..12}; do
             if tailscale status >/dev/null 2>&1; then
               READY=true
               echo "Tailscale is ready."
               break
             fi
-
             echo "Tailscale is not ready. Retry $i/12..."
             sleep 5
           done
-
           if [ "$READY" != "true" ]; then
             echo "ERROR: Tailscale failed to become ready."
             exit 1
           fi
-
-          echo
           echo "Tailscale hostname: $TAILSCALE_HOSTNAME"
-
-          echo
           echo "Tailscale version:"
           tailscale version
-
-          echo
           echo "Tailscale IPv4:"
           tailscale ip -4
-
-          echo
           echo "Tailscale IPv6:"
           tailscale ip -6 || true
-
-          echo
           echo "Tailscale status:"
           tailscale status
-
-          echo
-          echo "Checking IP forwarding:"
           test "$(sysctl -n net.ipv4.ip_forward)" = "1"
           test "$(sysctl -n net.ipv6.conf.all.forwarding)" = "1"
-
-          echo "IP forwarding OK."
-
-          echo
-          echo "Checking Tailscale SSH:"
-
           if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
             echo "Tailscale SSH: ENABLED"
           else
@@ -154,92 +98,33 @@ jobs:
             exit 1
           fi
 
-      # ========================================
-      # KEEP EXIT NODE ALIVE
-      # ========================================
-
       - name: Keep Exit Node Alive
         shell: bash
         run: |
           set -u
-
           SYSCTL_FILE="/etc/sysctl.d/99-tailscale.conf"
-
           for i in {1..335}; do
             sleep 60
-
-            # ------------------------------------
-            # CHECK IP FORWARDING
-            # ------------------------------------
-
-            if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ] || \
-               [ "$(sysctl -n net.ipv6.conf.all.forwarding)" != "1" ]; then
-
+            if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ] || [ "$(sysctl -n net.ipv6.conf.all.forwarding)" != "1" ]; then
               echo "[$i/335] WARNING: IP forwarding is disabled."
-              echo "Re-applying Tailscale forwarding configuration..."
-
-              sudo sysctl -p "$SYSCTL_FILE"
-
-              if [ "$(sysctl -n net.ipv4.ip_forward)" = "1" ] && \
-                 [ "$(sysctl -n net.ipv6.conf.all.forwarding)" = "1" ]; then
-                echo "[$i/335] IP forwarding successfully restored."
-              else
-                echo "[$i/335] WARNING: Failed to restore IP forwarding."
-              fi
-            fi
-
-            # ------------------------------------
-            # CHECK TAILSCALE
-            # ------------------------------------
-
-            if ! tailscale status >/dev/null 2>&1; then
-
-              echo "[$i/335] WARNING: Tailscale appears unhealthy."
-              echo "Attempting recovery..."
-
               sudo sysctl -p "$SYSCTL_FILE" || true
-
+            fi
+            if ! tailscale status >/dev/null 2>&1; then
+              echo "[$i/335] WARNING: Tailscale appears unhealthy."
+              sudo sysctl -p "$SYSCTL_FILE" || true
               sudo tailscale up \
                 --advertise-exit-node \
                 --accept-dns=false \
                 --ssh \
                 --hostname="$TAILSCALE_HOSTNAME" \
                 || true
-
               sleep 10
-
-              if tailscale status >/dev/null 2>&1; then
-                echo "[$i/335] Tailscale successfully recovered."
-              else
-                echo "[$i/335] WARNING: Tailscale recovery failed."
-              fi
             fi
-
-            # ------------------------------------
-            # CHECK TAILSCALE SSH
-            # ------------------------------------
-
             if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
               echo "[$i/335] Tailscale SSH OK."
             else
-              echo "[$i/335] WARNING: Tailscale SSH is disabled."
-              echo "Re-enabling Tailscale SSH..."
-
               sudo tailscale set --ssh || true
-
-              sleep 3
-
-              if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
-                echo "[$i/335] Tailscale SSH successfully recovered."
-              else
-                echo "[$i/335] WARNING: Failed to re-enable Tailscale SSH."
-              fi
             fi
-
-            # ------------------------------------
-            # FINAL HEALTH STATUS
-            # ------------------------------------
-
             if tailscale status >/dev/null 2>&1; then
               echo "[$i/335] Exit Node healthy."
             else
@@ -247,39 +132,23 @@ jobs:
             fi
           done
 
-      # ========================================
-      # FINAL STATUS
-      # ========================================
-
       - name: Final Tailscale Status
         if: always()
         shell: bash
         run: |
           echo "Final Tailscale status:"
           tailscale status || true
-
-          echo
           echo "Final Tailscale IPv4:"
           tailscale ip -4 || true
-
-          echo
           echo "Final Tailscale IPv6:"
           tailscale ip -6 || true
-
-          echo
           echo "Final Tailscale hostname:"
           echo "$TAILSCALE_HOSTNAME"
-
-          echo
           echo "Final Tailscale version:"
           tailscale version || true
-
-          echo
           echo "Final IP forwarding state:"
           sysctl net.ipv4.ip_forward || true
           sysctl net.ipv6.conf.all.forwarding || true
-
-          echo
           echo "Final Tailscale SSH state:"
           if sudo tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
             echo "Enabled"
