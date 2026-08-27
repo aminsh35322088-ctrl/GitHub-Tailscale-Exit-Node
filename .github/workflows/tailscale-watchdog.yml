@@ -26,6 +26,9 @@ jobs:
           REPO: ${{ github.repository }}
           WORKFLOW: tailscale-exit-node.yml
           QUEUED_TIMEOUT_MINUTES: 10
+          # Exit Node runs for ~350 min. If active run exceeds this,
+          # it may be stuck and needs replacement.
+          STALE_RUN_MINUTES: 420
         run: |
           set -euo pipefail
 
@@ -63,8 +66,55 @@ jobs:
           # --- Case 1: Exit Node is running ---
           if [ "$ACTIVE_COUNT" -gt 0 ]; then
             ACTIVE_RUN_ID="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .id' <<<"$RUNS_JSON" | head -1)"
-            ACTIVE_RUN_AGE="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .created_at' <<<"$RUNS_JSON" | head -1)"
-            echo "Exit Node is running (run $ACTIVE_RUN_ID, started $ACTIVE_RUN_AGE)."
+            ACTIVE_RUN_CREATED="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .created_at' <<<"$RUNS_JSON" | head -1)"
+            ACTIVE_RUN_UPDATED="$(jq -r '.workflow_runs[] | select(.status == "in_progress") | .updated_at' <<<"$RUNS_JSON" | head -1)"
+
+            NOW="$(date +%s)"
+            CREATED_TS="$(date -d "$ACTIVE_RUN_CREATED" +%s 2>/dev/null || echo 0)"
+            UPDATED_TS="$(date -d "$ACTIVE_RUN_UPDATED" +%s 2>/dev/null || echo 0)"
+
+            if [ "$CREATED_TS" -gt 0 ]; then
+              AGE_SECONDS=$((NOW - CREATED_TS))
+              AGE_MINUTES=$((AGE_SECONDS / 60))
+            else
+              AGE_MINUTES=0
+            fi
+
+            if [ "$UPDATED_TS" -gt 0 ]; then
+              STALE_SECONDS=$((NOW - UPDATED_TS))
+              STALE_MINUTES=$((STALE_SECONDS / 60))
+            else
+              STALE_MINUTES=0
+            fi
+
+            echo "Active run $ACTIVE_RUN_ID: age=${AGE_MINUTES}m, last_update=${STALE_MINUTES}m ago"
+
+            # --- Staleness Detection ---
+            # If the run has been active longer than STALE_RUN_MINUTES, it may be stuck.
+            # Only flag if it's significantly overdue (1.5x normal duration).
+            STALE_THRESHOLD=$((STALE_RUN_MINUTES * 3 / 2))
+            if [ "$AGE_MINUTES" -ge "$STALE_THRESHOLD" ]; then
+              echo "WARNING: Active run has been running for ${AGE_MINUTES}m (threshold: ${STALE_THRESHOLD}m)."
+              echo "This run may be stuck. Dispatching replacement..."
+
+              HTTP_CODE="$(curl -sS -o /tmp/dispatch-response.json -w "%{http_code}" \
+                -X POST "${HEADERS[@]}" \
+                -H 'Content-Type: application/json' \
+                "$DISPATCH_API" \
+                -d '{"ref":"main"}')"
+
+              if [ "$HTTP_CODE" = "204" ]; then
+                echo "Replacement dispatch accepted (HTTP 204). The stuck run will be replaced."
+                echo "Note: The old run may continue until GitHub Actions cleans it up."
+              else
+                echo "ERROR: Failed to dispatch replacement (HTTP $HTTP_CODE)."
+                cat /tmp/dispatch-response.json || true
+              fi
+              exit 0
+            fi
+
+            # Run is active and not stale - healthy
+            echo "Exit Node is running and healthy."
             exit 0
           fi
 

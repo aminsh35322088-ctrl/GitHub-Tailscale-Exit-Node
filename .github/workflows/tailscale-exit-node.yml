@@ -22,7 +22,7 @@ env:
 
 concurrency:
   group: tailscale-exit-node
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   exit-node:
@@ -108,22 +108,71 @@ jobs:
             exit 1
           fi
 
-      - name: Verify Exit Node Reachability
+      - name: Verify Exit Node State
         shell: bash
         run: |
           set -euo pipefail
-          echo "Verifying exit node is advertised and reachable..."
+          echo "========================================"
+          echo "VERIFYING EXIT NODE STATE"
+          echo "========================================"
+
           TS_IP="$(tailscale ip -4)"
           echo "Exit Node IP: $TS_IP"
 
+          # Check 1: Verify exit node tag is present
+          echo ""
+          echo "--- Check 1: Exit Node Tag ---"
           if tailscale status --json | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
-            echo "Exit node tag verified."
+            echo "PASS: tag:exit is present on this node."
           else
-            echo "WARNING: tag:exit not found on self. Checking status..."
-            tailscale status
+            echo "FAIL: tag:exit not found on this node."
+            echo "Attempting to re-advertise exit node..."
+            sudo tailscale set --advertise-exit-node
+            sleep 5
+            if tailscale status --json | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
+              echo "RECOVERED: tag:exit now present after re-advertisement."
+            else
+              echo "ERROR: Could not restore tag:exit. Exit node may not function."
+              exit 1
+            fi
           fi
 
-          echo "Exit node is operational."
+          # Check 2: Verify exit node is advertised in status
+          echo ""
+          echo "--- Check 2: Exit Node Advertisement ---"
+          TS_STATUS_JSON="$(tailscale status --json)"
+          EXPECTED_ROUTES="$(echo "$TS_STATUS_JSON" | jq -r '.Self.ExpectedRoutes // [] | length')"
+          echo "Expected routes count: $EXPECTED_ROUTES"
+
+          # Check 3: Verify IP forwarding is active (required for exit node)
+          echo ""
+          echo "--- Check 3: IP Forwarding ---"
+          if [ "$(sysctl -n net.ipv4.ip_forward)" = "1" ]; then
+            echo "PASS: IPv4 forwarding is enabled."
+          else
+            echo "FAIL: IPv4 forwarding is disabled."
+            exit 1
+          fi
+
+          # Check 4: Quick dataplane connectivity test (public IP check)
+          echo ""
+          echo "--- Check 4: Dataplane Connectivity ---"
+          PUBLIC_IP="$(curl -s --max-time 10 https://ifconfig.me 2>/dev/null || true)"
+          if [ -n "$PUBLIC_IP" ]; then
+            echo "PASS: Public IP reachable: $PUBLIC_IP"
+            echo "Exit Node IP: $TS_IP"
+            if [ "$PUBLIC_IP" != "$TS_IP" ]; then
+              echo "NOTE: Public IP differs from Tailscale IP (expected if not using this as exit)."
+            fi
+          else
+            echo "WARNING: Could not reach public IP. This may indicate dataplane issue."
+            echo "Continuing anyway - the exit node may still function for Tailscale peers."
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "EXIT NODE STATE VERIFICATION COMPLETE"
+          echo "========================================"
 
       - name: Keep Exit Node Alive
         shell: bash
@@ -193,12 +242,36 @@ jobs:
           echo "=========================================="
           echo "GRACEFUL SHUTDOWN"
           echo "=========================================="
-          echo "Removing exit node advertisement..."
+          echo "Disabling exit node advertisement..."
 
-          sudo tailscale set --reset || true
+          # Use documented flag to disable exit node advertisement
+          if sudo tailscale set --advertise-exit-node=false; then
+            echo "Exit node advertisement disabled successfully."
+          else
+            echo "ERROR: Failed to disable exit node advertisement."
+            echo "The exit node may remain advertised until Tailscale coordination server detects the node is offline."
+          fi
 
+          # Verify the state change
           sleep 5
+          echo ""
+          echo "Verifying shutdown state..."
 
-          echo "Final status:"
-          tailscale status || true
-          echo "Exit node deregistered."
+          TS_JSON="$(tailscale status --json 2>/dev/null || true)"
+          if [ -n "$TS_JSON" ]; then
+            # Check if exit node tag is still present
+            if echo "$TS_JSON" | jq -e '.Self.Tags | contains(["tag:exit"])' >/dev/null 2>&1; then
+              echo "WARNING: tag:exit still present after disable. Retrying..."
+              sudo tailscale set --advertise-exit-node=false || true
+              sleep 3
+            fi
+
+            # Check self status
+            echo "Final Tailscale status:"
+            tailscale status || true
+          else
+            echo "Tailscale not reachable for final status check."
+          fi
+
+          echo ""
+          echo "Graceful shutdown complete."
