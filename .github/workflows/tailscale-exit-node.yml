@@ -31,6 +31,133 @@ jobs:
     timeout-minutes: 350
 
     steps:
+      - name: Check for Active Healthy Exit Node
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: tailscale-exit-node.yml
+          # Normal exit node duration is ~350 min. A run active beyond
+          # this is likely stale/stuck and can be replaced.
+          STALE_THRESHOLD_MINUTES: 420
+        run: |
+          set -u
+
+          echo "=========================================="
+          echo "DUPLICATE EXIT NODE DETECTION"
+          echo "=========================================="
+          echo "Time: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+
+          RUNS_API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs"
+          HEADERS=(
+            -H "Accept: application/vnd.github+json"
+            -H "Authorization: Bearer $GH_TOKEN"
+            -H "X-GitHub-Api-Version: 2022-11-28"
+          )
+
+          CURRENT_RUN_ID="${{ github.run_id }}"
+          NOW="$(date +%s)"
+
+          # Fetch recent runs with retries for API transient errors
+          RUNS_JSON=""
+          for ATTEMPT in 1 2 3; do
+            RUNS_JSON="$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=10" 2>/dev/null || true)"
+            if [ -n "$RUNS_JSON" ] && echo "$RUNS_JSON" | jq -e '.workflow_runs' >/dev/null 2>&1; then
+              break
+            fi
+            echo "API retry $ATTEMPT/3..."
+            sleep 3
+          done
+
+          # If API completely failed after retries, fail-safe: proceed with startup
+          # (better to risk duplicate than leave no exit node running)
+          if [ -z "$RUNS_JSON" ] || ! echo "$RUNS_JSON" | jq -e '.workflow_runs' >/dev/null 2>&1; then
+            echo "WARNING: GitHub API unreachable after 3 retries."
+            echo "Fail-safe: proceeding with exit node startup."
+            echo "=========================================="
+            exit 0
+          fi
+
+          # Find active (in_progress) runs of this workflow, excluding self
+          ACTIVE_RUNS="$(echo "$RUNS_JSON" | jq -r --arg self "$CURRENT_RUN_ID" '
+            [.workflow_runs[] |
+              select(.status == "in_progress" and (.id | tostring) != $self)]
+            | sort_by(.created_at) | reverse
+          ')"
+
+          ACTIVE_COUNT="$(echo "$ACTIVE_RUNS" | jq 'length')"
+
+          if [ "$ACTIVE_COUNT" -eq 0 ]; then
+            echo "No other active Exit Node runs found. Proceeding with startup."
+            echo "=========================================="
+            exit 0
+          fi
+
+          echo "Found $ACTIVE_COUNT other active run(s). Checking health..."
+
+          # Extract the most recent active run's data (no subshell)
+          MOST_RECENT_ID="$(echo "$ACTIVE_RUNS" | jq -r '.[0].id')"
+          MOST_RECENT_CREATED="$(echo "$ACTIVE_RUNS" | jq -r '.[0].created_at')"
+          MOST_RECENT_UPDATED="$(echo "$ACTIVE_RUNS" | jq -r '.[0].updated_at')"
+
+          CREATED_TS="$(date -d "$MOST_RECENT_CREATED" +%s 2>/dev/null || echo 0)"
+          UPDATED_TS="$(date -d "$MOST_RECENT_UPDATED" +%s 2>/dev/null || echo 0)"
+
+          if [ "$CREATED_TS" -gt 0 ]; then
+            AGE_MINUTES=$(( (NOW - CREATED_TS) / 60 ))
+          else
+            AGE_MINUTES=0
+          fi
+
+          if [ "$UPDATED_TS" -gt 0 ]; then
+            STALE_MINUTES=$(( (NOW - UPDATED_TS) / 60 ))
+          else
+            STALE_MINUTES=0
+          fi
+
+          echo "Most recent active run: $MOST_RECENT_ID"
+          echo "  Age: ${AGE_MINUTES}m, Last update: ${STALE_MINUTES}m ago"
+
+          # Decision: is the active run healthy?
+          if [ "$AGE_MINUTES" -lt "$STALE_THRESHOLD_MINUTES" ]; then
+            echo ""
+            echo "=========================================="
+            echo "SKIP: Healthy Exit Node run already exists."
+            echo "Run $MOST_RECENT_ID is active (age ${AGE_MINUTES}m < threshold ${STALE_THRESHOLD_MINUTES}m)."
+            echo "Skipping duplicate startup."
+            echo "=========================================="
+            exit 0
+          fi
+
+          echo "Run $MOST_RECENT_ID appears stale (age ${AGE_MINUTES}m >= threshold ${STALE_THRESHOLD_MINUTES}m)."
+
+          # Re-fetch to confirm staleness (avoid TOCTOU race)
+          sleep 2
+          RECHECK_JSON="$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=5" 2>/dev/null || true)"
+          if [ -n "$RECHECK_JSON" ]; then
+            RECHECK_STILL_ACTIVE="$(echo "$RECHECK_JSON" | jq -r --arg self "$CURRENT_RUN_ID" --arg threshold "$STALE_THRESHOLD_MINUTES" '
+              [.workflow_runs[] |
+                select(.status == "in_progress" and (.id | tostring) != $self)] |
+              sort_by(.created_at) | reverse | .[0] |
+              select(
+                ((now - (.created_at | fromdateiso8601)) / 60) < ($threshold | tonumber)
+              ) | .id
+            ' 2>/dev/null || true)"
+
+            if [ -n "$RECHECK_STILL_ACTIVE" ]; then
+              echo ""
+              echo "=========================================="
+              echo "SKIP: Healthy Exit Node run $RECHECK_STILL_ACTIVE confirmed on recheck."
+              echo "The previous run recovered. Skipping duplicate startup."
+              echo "=========================================="
+              exit 0
+            fi
+          fi
+
+          echo ""
+          echo "No healthy Exit Node run detected. Proceeding with startup."
+          echo "=========================================="
+
       - name: Enable IP Forwarding
         shell: bash
         run: |
