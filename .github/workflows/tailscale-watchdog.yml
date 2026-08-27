@@ -19,59 +19,109 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Check Exit Node Workflow
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN }}
           REPO: ${{ github.repository }}
           WORKFLOW: tailscale-exit-node.yml
+          QUEUED_TIMEOUT_MINUTES: 10
         run: |
           set -euo pipefail
 
           echo "=========================================="
           echo "Tailscale Exit Node Watchdog"
           echo "=========================================="
-
           echo "Repository: $REPO"
           echo "Workflow:   $WORKFLOW"
 
-          RUNS_JSON=$(curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=10")
+          API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs"
+          HEADERS=(
+            -H "Accept: application/vnd.github+json"
+            -H "Authorization: Bearer $GH_TOKEN"
+            -H "X-GitHub-Api-Version: 2026-03-10"
+          )
 
-          ACTIVE_COUNT=$(echo "$RUNS_JSON" | jq '
-            [
-              .workflow_runs[]
-              | select(
-                  .status == "queued"
-                  or .status == "in_progress"
-                  or .status == "waiting"
-                  or .status == "requested"
-                  or .status == "pending"
-                )
-            ] | length
-          ')
+          RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$API?per_page=20")
 
-          echo "Active Exit Node runs: $ACTIVE_COUNT"
+          # Only an actually running job is considered active.
+          # queued/requested/waiting runs are handled separately so a stuck
+          # queue cannot make the watchdog permanently think the node is alive.
+          ACTIVE_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "in_progress")] | length')
+          QUEUED_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "queued")] | length')
+          WAITING_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "waiting" or .status == "requested" or .status == "pending")] | length')
+
+          echo "Active (in_progress): $ACTIVE_COUNT"
+          echo "Queued:               $QUEUED_COUNT"
+          echo "Waiting/requested:    $WAITING_COUNT"
 
           if [ "$ACTIVE_COUNT" -gt 0 ]; then
-            echo "Exit Node workflow is already active."
+            echo "Exit Node workflow is currently running."
             exit 0
           fi
 
-          echo "No active Exit Node run found."
+          # A queued run can block the concurrency group. Cancel only queued
+          # runs that have been stuck longer than the configured threshold.
+          NOW=$(date +%s)
+          STALE_FOUND=0
+
+          while IFS=$'\t' read -r RUN_ID CREATED_AT; do
+            [ -n "$RUN_ID" ] || continue
+
+            CREATED_TS=$(date -d "$CREATED_AT" +%s 2>/dev/null || echo 0)
+            AGE_SECONDS=$((NOW - CREATED_TS))
+            AGE_MINUTES=$((AGE_SECONDS / 60))
+
+            echo "Queued run $RUN_ID age: ${AGE_MINUTES}m"
+
+            if [ "$CREATED_TS" -gt 0 ] && [ "$AGE_SECONDS" -ge $((QUEUED_TIMEOUT_MINUTES * 60)) ]; then
+              echo "Cancelling stale queued run: $RUN_ID"
+
+              HTTP_CODE=$(curl -sS -o /tmp/cancel-response.json \
+                -w "%{http_code}" \
+                -X POST \
+                "${HEADERS[@]}" \
+                "$API/$RUN_ID/cancel")
+
+              echo "Cancel HTTP status: $HTTP_CODE"
+
+              if [ "$HTTP_CODE" != "202" ] && [ "$HTTP_CODE" != "409" ] && [ "$HTTP_CODE" != "404" ]; then
+                echo "ERROR: Failed to cancel stale run $RUN_ID"
+                cat /tmp/cancel-response.json || true
+                exit 1
+              fi
+
+              STALE_FOUND=1
+            fi
+          done < <(echo "$RUNS_JSON" | jq -r '.workflow_runs[] | select(.status == "queued") | [.id, .created_at] | @tsv')
+
+          # Refresh after cancelling stale queued runs.
+          if [ "$STALE_FOUND" -eq 1 ]; then
+            sleep 3
+            RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$API?per_page=20")
+            ACTIVE_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "in_progress")] | length')
+            QUEUED_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "queued")] | length')
+          fi
+
+          if [ "$ACTIVE_COUNT" -gt 0 ]; then
+            echo "An Exit Node run became active during cleanup."
+            exit 0
+          fi
+
+          if [ "$QUEUED_COUNT" -gt 0 ]; then
+            echo "A non-stale Exit Node run is still queued."
+            echo "Waiting for GitHub Actions concurrency instead of creating another run."
+            exit 0
+          fi
+
+          echo "No active or blocked Exit Node run found."
           echo "Starting a new Exit Node workflow..."
 
           HTTP_CODE=$(curl -sS -o /tmp/dispatch-response.json \
             -w "%{http_code}" \
             -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/dispatches" \
+            "${HEADERS[@]}" \
+            "$API/dispatches" \
             -d "{\"ref\":\"${GITHUB_REF_NAME}\"}")
 
           echo "Dispatch HTTP status: $HTTP_CODE"
