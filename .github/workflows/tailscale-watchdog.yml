@@ -2,13 +2,12 @@ name: Tailscale Exit Node Watchdog
 
 on:
   schedule:
-    # هر 15 دقیقه
     - cron: '7,22,37,52 * * * *'
-
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: tailscale-exit-node-watchdog
@@ -22,7 +21,7 @@ jobs:
       - name: Check Exit Node Workflow
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WORKFLOW: tailscale-exit-node.yml
           QUEUED_TIMEOUT_MINUTES: 10
@@ -40,14 +39,11 @@ jobs:
           HEADERS=(
             -H "Accept: application/vnd.github+json"
             -H "Authorization: Bearer $GH_TOKEN"
-            -H "X-GitHub-Api-Version: 2026-03-10"
+            -H "X-GitHub-Api-Version: 2022-11-28"
           )
 
           RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=20")
 
-          # Only an actually running job is considered active.
-          # queued/requested/waiting runs are handled separately so a stuck
-          # queue cannot make the watchdog permanently think the node is alive.
           ACTIVE_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "in_progress")] | length')
           QUEUED_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "queued")] | length')
           WAITING_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "waiting" or .status == "requested" or .status == "pending")] | length')
@@ -61,8 +57,6 @@ jobs:
             exit 0
           fi
 
-          # A queued run can block the concurrency group. Cancel only queued
-          # runs that have been stuck longer than the configured threshold.
           NOW=$(date +%s)
           STALE_FOUND=0
 
@@ -96,7 +90,6 @@ jobs:
             fi
           done < <(echo "$RUNS_JSON" | jq -r '.workflow_runs[] | select(.status == "queued") | [.id, .created_at] | @tsv')
 
-          # Refresh after cancelling stale queued runs.
           if [ "$STALE_FOUND" -eq 1 ]; then
             sleep 3
             RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=20")
@@ -118,8 +111,6 @@ jobs:
           echo "No active or blocked Exit Node run found."
           echo "Starting a new Exit Node workflow..."
 
-          # Workflow dispatch belongs to the workflow endpoint itself, not the
-          # /runs collection. The token must have Actions: write permission.
           HTTP_CODE=$(curl -sS -o /tmp/dispatch-response.json \
             -w "%{http_code}" \
             -X POST \
@@ -133,7 +124,7 @@ jobs:
             echo "ERROR: Failed to dispatch Exit Node workflow."
             cat /tmp/dispatch-response.json || true
             echo
-            echo "If this is HTTP 403/404, verify ACTIONS_WATCHDOG_TOKEN has Actions: write access to this repository."
+            echo "The watchdog now uses GITHUB_TOKEN with actions: write permission."
             exit 1
           fi
 
