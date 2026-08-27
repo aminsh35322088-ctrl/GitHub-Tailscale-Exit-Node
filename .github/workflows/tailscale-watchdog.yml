@@ -35,14 +35,15 @@ jobs:
           echo "Repository: $REPO"
           echo "Workflow:   $WORKFLOW"
 
-          API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs"
+          RUNS_API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs"
+          DISPATCH_API="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/dispatches"
           HEADERS=(
             -H "Accept: application/vnd.github+json"
             -H "Authorization: Bearer $GH_TOKEN"
             -H "X-GitHub-Api-Version: 2026-03-10"
           )
 
-          RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$API?per_page=20")
+          RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=20")
 
           # Only an actually running job is considered active.
           # queued/requested/waiting runs are handled separately so a stuck
@@ -81,7 +82,7 @@ jobs:
                 -w "%{http_code}" \
                 -X POST \
                 "${HEADERS[@]}" \
-                "$API/$RUN_ID/cancel")
+                "$RUNS_API/$RUN_ID/cancel")
 
               echo "Cancel HTTP status: $HTTP_CODE"
 
@@ -98,7 +99,7 @@ jobs:
           # Refresh after cancelling stale queued runs.
           if [ "$STALE_FOUND" -eq 1 ]; then
             sleep 3
-            RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$API?per_page=20")
+            RUNS_JSON=$(curl -fsSL "${HEADERS[@]}" "$RUNS_API?per_page=20")
             ACTIVE_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "in_progress")] | length')
             QUEUED_COUNT=$(echo "$RUNS_JSON" | jq '[.workflow_runs[] | select(.status == "queued")] | length')
           fi
@@ -117,18 +118,22 @@ jobs:
           echo "No active or blocked Exit Node run found."
           echo "Starting a new Exit Node workflow..."
 
+          # Workflow dispatch belongs to the workflow endpoint itself, not the
+          # /runs collection. The token must have Actions: write permission.
           HTTP_CODE=$(curl -sS -o /tmp/dispatch-response.json \
             -w "%{http_code}" \
             -X POST \
             "${HEADERS[@]}" \
-            "$API/dispatches" \
-            -d "{\"ref\":\"${GITHUB_REF_NAME}\"}")
+            "$DISPATCH_API" \
+            -d '{"ref":"main"}')
 
           echo "Dispatch HTTP status: $HTTP_CODE"
 
           if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
             echo "ERROR: Failed to dispatch Exit Node workflow."
             cat /tmp/dispatch-response.json || true
+            echo
+            echo "If this is HTTP 403/404, verify ACTIONS_WATCHDOG_TOKEN has Actions: write access to this repository."
             exit 1
           fi
 
