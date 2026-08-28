@@ -44,6 +44,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Stop must take effect immediately, not after up to a full online cycle.
+      # The `vars` context is resolved at job start, so a run queued before the
+      # kill switch was set would otherwise still bring up an exit node.  Re-read
+      # the live value and cancel ourselves before connecting.
+      - name: Honor kill switch
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          VAL="${{ vars.EXIT_NODE_DISABLED }}"
+          if [ -z "$VAL" ]; then
+            VAL="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/variables/EXIT_NODE_DISABLED" \
+              | jq -r '.value // empty' 2>/dev/null || true)"
+          fi
+          case "$VAL" in
+            true|1|yes)
+              echo "EXIT_NODE_DISABLED is set; cancelling this run so it does not start an exit node."
+              curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/cancel" || true
+              sleep 5
+              ;;
+            *) echo "Kill switch off; continuing." ;;
+          esac
+
       - name: Enable IP Forwarding
         shell: bash
         run: |
@@ -158,19 +185,31 @@ jobs:
             sudo tailscale debug prefs 2>/dev/null | jq -e '.RunSSH == true' >/dev/null 2>&1
           }
 
-          for i in $(seq 1 "$TOTAL"); do
-            sleep 60
+          # Wall-clock deadline: each iteration sleeps up to 60 s rather than
+          # counting a fixed number of iterations, so the handover step always
+          # has the full remaining budget and we never blow past the job
+          # timeout-minutes ceiling.
+          START_EPOCH="$(date +%s)"
+          DEADLINE_EPOCH=$(( START_EPOCH + TOTAL * 60 ))
+          i=0
+          while true; do
+            NOW_EPOCH="$(date +%s)"
+            if [ "$NOW_EPOCH" -ge "$DEADLINE_EPOCH" ]; then break; fi
+            REMAIN=$(( DEADLINE_EPOCH - NOW_EPOCH ))
+            sleep_sec=$(( REMAIN < 60 ? REMAIN : 60 ))
+            sleep "$sleep_sec"
+            i=$((i + 1))
 
             if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ] \
               || [ "$(sysctl -n net.ipv6.conf.all.forwarding)" != "1" ]; then
-              echo "[${i}/${TOTAL}] IP forwarding was disabled. Restoring..."
+              echo "[${i}] IP forwarding was disabled. Restoring..."
               sudo sysctl -p "$SYSCTL_FILE" || true
             fi
 
             if ! tailscale status >/dev/null 2>&1; then
-              echo "[${i}/${TOTAL}] Tailscale is unreachable. Attempting recovery..."
+              echo "[${i}] Tailscale is unreachable. Attempting recovery..."
               sudo sysctl -p "$SYSCTL_FILE" || true
-              sudo tailscale up \
+              timeout 120 sudo tailscale up \
                 --advertise-exit-node \
                 --accept-dns=false \
                 --ssh \
@@ -180,27 +219,27 @@ jobs:
 
               if ! tailscale status >/dev/null 2>&1; then
                 FAILURES=$((FAILURES + 1))
-                echo "[${i}/${TOTAL}] Recovery failed (${FAILURES}/${MAX_FAILURES})."
+                echo "[${i}] Recovery failed (${FAILURES}/${MAX_FAILURES})."
                 if [ "$FAILURES" -ge "$MAX_FAILURES" ]; then
-                  echo "[${i}/${TOTAL}] Giving up so a replacement run can take over."
+                  echo "[${i}] Giving up so a replacement run can take over."
                   exit 1
                 fi
                 continue
               fi
-              echo "[${i}/${TOTAL}] Tailscale recovered."
+              echo "[${i}] Tailscale recovered."
               FAILURES=0
             else
               FAILURES=0
             fi
 
-            ssh_enabled || { echo "[${i}/${TOTAL}] Re-enabling Tailscale SSH..."; sudo tailscale set --ssh || true; }
-            advertises_exit || { echo "[${i}/${TOTAL}] Re-advertising exit node..."; sudo tailscale set --advertise-exit-node=true || true; }
+            ssh_enabled || { echo "[${i}] Re-enabling Tailscale SSH..."; sudo tailscale set --ssh || true; }
+            advertises_exit || { echo "[${i}] Re-advertising exit node..."; sudo tailscale set --advertise-exit-node=true || true; }
 
             # A lost tag cannot be repaired from here; surface it rather than
             # looping quietly on a node peers cannot use as an exit.
-            has_exit_tag || echo "::warning::[${i}/${TOTAL}] tag:exit is missing. Peers cannot use this node as an exit node."
+            has_exit_tag || echo "::warning::[${i}] tag:exit is missing. Peers cannot use this node as an exit node."
 
-            echo "[${i}/${TOTAL}] Exit node healthy."
+            echo "[${i}] Exit node healthy."
           done
 
       # Queue the successor while this run still holds the concurrency group.

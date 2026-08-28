@@ -74,6 +74,32 @@ log()  { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 warn() { printf '::warning::%s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
+# Kill-switch helper
+# ---------------------------------------------------------------------------
+# The `vars` context is resolved at job start, so a run that started hours ago
+# carries the value from back then.  Re-read the live repository variable when
+# the token is allowed to (a PAT with `actions:read` or `repo` scope); fall
+# back to the captured $DISABLED otherwise.
+kill_switch_engaged() {
+  case "${DISABLED,,}" in
+    true|1|yes) return 0 ;;
+  esac
+  local code val
+  code="$(curl -sS -o /tmp/ensure-var.json -w '%{http_code}' \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: Bearer ${GH_TOKEN}" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "https://api.github.com/repos/${REPO}/actions/variables/EXIT_NODE_DISABLED" 2>/dev/null || true)"
+  if [ "$code" = "200" ]; then
+    val="$(jq -r '.value // ""' /tmp/ensure-var.json 2>/dev/null || true)"
+    case "${val,,}" in
+      true|1|yes) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
 
@@ -212,8 +238,8 @@ confirm_dispatch() {
     fi
     log "Waiting for dispatched run to appear... ${attempt}/6"
   done
-  warn "Dispatch was accepted but no run became visible within 30s. A later backstop will retry."
-  return 0
+  warn "Dispatch was accepted but no run became visible within 30s. Reporting failure so the caller falls back to the relaunch job."
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -225,12 +251,10 @@ main() {
   log "Workflow   : ${WORKFLOW}"
   [ -n "$SELF_RUN_ID" ] && log "Excluding  : run ${SELF_RUN_ID} (caller)"
 
-  case "${DISABLED,,}" in
-    true|1|yes)
-      log "EXIT_NODE_DISABLED is set. Not dispatching; the relaunch chain stops here."
-      return 0
-      ;;
-  esac
+  if kill_switch_engaged; then
+    log "EXIT_NODE_DISABLED is set (live or captured). Not dispatching; the relaunch chain stops here."
+    return 0
+  fi
 
   local runs others_json active pending active_count pending_count
   runs="$(get_runs)" || {
@@ -274,7 +298,7 @@ main() {
         if [ "$still" -eq 0 ]; then
           log "Run ${id} has left in_progress."
           dispatch_run || return 1
-          confirm_dispatch
+          confirm_dispatch || return 1
           return 0
         fi
         log "Waiting for cancellation to settle... ${attempt}/12"
@@ -303,7 +327,7 @@ main() {
       cancel_run "$pid" || return 1
       sleep 5
       dispatch_run || return 1
-      confirm_dispatch
+      confirm_dispatch || return 1
       return 0
     fi
 
