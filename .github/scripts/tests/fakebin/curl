@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Test double for curl.
+#  GET  -> serves MOCK_RUNS, or MOCK_RUNS_AFTER once a POST has been recorded.
+#  POST -> records the URL in POST_LOG and returns MOCK_POST_CODE.
+if printf '%s' "$*" | grep -q -- '-X POST'; then
+  url="$(printf '%s\n' "$@" | grep -E '^https://' | tail -1)"
+  echo "$url" >> "${POST_LOG:-/dev/null}"
+  out=""; prev=""
+  for a in "$@"; do
+    [ "$prev" = "-o" ] && out="$a"
+    prev="$a"
+  done
+  [ -n "$out" ] && echo '{}' > "$out"
+  case "$url" in
+    */cancel)     printf '%s' "${MOCK_CANCEL_CODE:-202}" ;;
+    */dispatches) printf '%s' "${MOCK_POST_CODE:-204}" ;;
+    *)            printf '%s' "${MOCK_POST_CODE:-204}" ;;
+  esac
+  exit 0
+fi
+if [ -n "${MOCK_RUNS_AFTER:-}" ] && [ -s "${POST_LOG:-/nonexistent}" ]; then
+  cat "$MOCK_RUNS_AFTER"
+else
+  cat "$MOCK_RUNS"
+fi
