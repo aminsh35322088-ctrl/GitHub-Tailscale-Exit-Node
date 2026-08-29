@@ -1,143 +1,101 @@
 [English](./README.en.md)
 
-# supreme-palm-tree — راهنمای فارسی 🇮🇷
+# GitHub Tailscale Exit Node — راهنمای فارسی 🇮🇷
 
 یک Tailscale Exit Node که روی GitHub Actions اجرا می‌شود و با مکانیزم‌های self-relaunch و watchdog سعی می‌کند تا حد ممکن آنلاین بماند.
 
-> ⚠️ **نکته مهم:** GitHub Actions یک سرور VPS دائمی نیست. Runnerها موقتی هستند و اجرای هر Job محدودیت زمانی دارد. این پروژه با زنجیره‌کردن اجراها و مکانیزم recovery برای uptime بالا طراحی شده، اما تضمین 24/7 نمی‌دهد.
+> ⚠️ **نکته مهم:** GitHub Actions یک VPS دائمی نیست. Runnerها موقتی هستند و اجرای هر Job محدودیت زمانی دارد. این پروژه برای uptime بالا و recovery خودکار طراحی شده، اما 24/7 را تضمین نمی‌کند.
 
-## این پروژه دقیقاً چه کار می‌کند؟
+## این پروژه چیست؟
 
-به‌جای اینکه Exit Node را روی یک کامپیوتر یا VPS دائمی اجرا کنید، GitHub Actions یک Linux runner موقت می‌سازد و Tailscale را روی آن اجرا می‌کند.
-
-هر اجرا حداکثر برای مدت مشخصی آنلاین می‌ماند و قبل از پایان، اجرای بعدی را آماده می‌کند. در کنار آن، watchdog وضعیت سیستم را بررسی می‌کند و اگر Exit Node از کار افتاده باشد، دوباره آن را راه‌اندازی می‌کند.
+GitHub Actions یک Linux runner موقت ایجاد می‌کند، Tailscale را روی آن اجرا می‌کند و Runner را به‌عنوان Exit Node در Tailnet شما معرفی می‌کند.
 
 ساختار کلی:
 
 ```text
 GitHub Actions Runner
-        │
-        ▼
+        ↓
    Tailscale Node
-        │
-        ▼
-    tag:exit
-        │
-        ▼
+        ↓
+     tag:exit
+        ↓
     Exit Node
-        │
-        ├── Self-relaunch → اجرای بعدی
-        │
-        └── Watchdog → بررسی و Recovery
+        ↓
+Self-relaunch + Watchdog
 ```
-
----
 
 # 🚀 آموزش راه‌اندازی از صفر
 
-این راهنما برای کاربری نوشته شده که حتی قبلاً با GitHub Actions یا Tailscale کار نکرده است.
+این راهنما برای کاربران مبتدی نوشته شده است؛ نیازی به VPS یا Linux ندارید.
 
-## پیش‌نیازها
+## 1. Fork کردن پروژه
 
-- یک حساب GitHub
-- یک حساب Tailscale
-- دسترسی به GitHub Actions
-- یک دستگاه مقصد که Tailscale روی آن نصب باشد
+روی **Fork** بزنید و پروژه را داخل حساب GitHub خودتان کپی کنید. از این مرحله به بعد Workflowها را در Fork خودتان اجرا کنید.
 
----
+## 2. ساخت Tailscale و Tag
 
-## 1. ساخت Fork از پروژه
-
-ابتدا وارد صفحه اصلی پروژه شوید و روی **Fork** بزنید.
-
-بعد از Fork، یک کپی از پروژه داخل حساب GitHub خودتان خواهید داشت.
-
-از این به بعد **Fork خودتان** را استفاده کنید، نه ریپوی اصلی.
-
----
-
-## 2. ساخت حساب Tailscale و Tag
-
-اگر حساب Tailscale ندارید، یک حساب بسازید و وارد پنل شوید.
-
-این پروژه از Tag زیر استفاده می‌کند:
+وارد حساب Tailscale شوید و Tag زیر را برای Nodeهای این پروژه در Policy/ACL خود تعریف کنید:
 
 ```text
 tag:exit
 ```
 
-در Policy/ACL تیل‌اسکیل، Tag را طوری تنظیم کنید که OAuth Client شما بتواند آن را به Node اختصاص دهد.
+OAuth Client شما باید اجازه استفاده از این Tag را داشته باشد.
 
----
+## 3. ساخت OAuth Client
 
-## 3. ساخت Tailscale OAuth Client
+در پنل Tailscale یک **OAuth Client** بسازید و اجازه استفاده از `tag:exit` را به آن بدهید.
 
-در پنل مدیریت Tailscale یک **OAuth Client** بسازید و اجازه استفاده از `tag:exit` را به آن بدهید.
-
-دو مقدار دریافت می‌کنید:
+مقادیر زیر را نگه دارید:
 
 ```text
 TS_OAUTH_CLIENT_ID
 TS_OAUTH_SECRET
 ```
 
-> **هشدار:** `TS_OAUTH_SECRET` را داخل کد، README، Issue، Commit یا Chat عمومی قرار ندهید.
+`TS_OAUTH_SECRET` را هیچ‌وقت داخل کد یا Commit قرار ندهید.
 
----
+## 4. ساخت Fine-grained PAT
 
-## 4. ساخت GitHub Fine-grained PAT
+در GitHub از مسیر **Settings → Developer settings → Personal access tokens → Fine-grained tokens** یک Token بسازید.
 
-برای watchdog یک **Fine-grained Personal Access Token** بسازید.
-
-Repository access را فقط به **Fork خودتان** محدود کنید.
-
-حداقل permission لازم:
+Repository access را فقط به Fork خودتان محدود کنید و حداقل این Permission را بدهید:
 
 ```text
 Actions: Read and write
 ```
 
-`Metadata: Read-only` نیز معمولاً به‌صورت پیش‌فرض لازم است.
-
-سپس Token را به‌عنوان Secret زیر در Fork ذخیره کنید:
+Token را با نام زیر به Repository secrets اضافه کنید:
 
 ```text
 ACTIONS_WATCHDOG_TOKEN
 ```
 
-> Token را مثل رمز عبور نگه دارید و هرگز Commit نکنید.
-
----
-
-## 5. اضافه‌کردن Secrets به GitHub
+## 5. اضافه‌کردن Secrets
 
 در Fork خودتان بروید به:
 
 **Settings → Secrets and variables → Actions → New repository secret**
 
-این Secretها را بسازید:
+این موارد را اضافه کنید:
 
-| نام | مقدار |
+| Name | Value |
 |---|---|
-| `TS_OAUTH_CLIENT_ID` | OAuth Client ID از Tailscale |
-| `TS_OAUTH_SECRET` | OAuth Client Secret از Tailscale |
-| `ACTIONS_WATCHDOG_TOKEN` | Fine-grained PAT |
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth Client ID |
+| `TS_OAUTH_SECRET` | Tailscale OAuth Client Secret |
+| `ACTIONS_WATCHDOG_TOKEN` | Fine-grained GitHub PAT |
 
----
+## 6. فعال‌کردن Actions
 
-## 6. فعال‌کردن GitHub Actions
+تب **Actions** را باز کنید و در صورت درخواست GitHub، Workflowها را فعال کنید.
 
-وارد تب **Actions** شوید و اگر GitHub خواست، Workflowها را فعال کنید.
+## 7. اجرای اولیه
 
----
-
-## 7. اولین اجرای Exit Node
-
-به مسیر زیر بروید:
+به:
 
 **Actions → Tailscale Exit Node Watchdog → Run workflow**
 
-مقدار زیر را انتخاب کنید:
+بروید و انتخاب کنید:
 
 ```text
 action = ensure
@@ -145,121 +103,73 @@ action = ensure
 
 سپس **Run workflow** را بزنید.
 
-Watchdog بررسی می‌کند که آیا Exit Node فعال است یا نه و در صورت نیاز Workflow مربوط به Exit Node را اجرا می‌کند.
+## 8. بررسی Exit Node
 
----
+در **Actions → Tailscale Exit Node** اجرای جدید را باز کنید. پس از موفقیت، Runner موقت باید در Tailscale به‌عنوان یک Node با `tag:exit` دیده شود.
 
-## 8. بررسی Runner
+اگر Tailscale درخواست Approval کرد، آن را در Admin Console تأیید کنید.
 
-در **Actions → Tailscale Exit Node** اجرای جدید را باز کنید.
+## 9. اتصال دستگاه خودتان
 
-پس از موفقیت، یک Linux runner موقت در Tailscale با هویت `tag:exit` خواهید دید.
+روی گوشی یا کامپیوتر مقصد:
 
----
+1. Tailscale را نصب و وارد همان Tailnet شوید.
+2. Tailscale را روشن کنید.
+3. بخش **Exit Node** را باز کنید.
+4. GitHub Actions runner را انتخاب کنید.
 
-## 9. تأیید Exit Node
-
-در Tailscale Admin Console دستگاه جدید را پیدا کنید. اگر Tailscale درخواست approval کرد، آن را تأیید کنید.
-
-Workflow، Runner را به‌عنوان Exit Node advertise می‌کند. سپس روی دستگاه مقصد:
-
-**Tailscale → Exit node → انتخاب GitHub runner**
-
-را انجام دهید.
-
----
-
-## 10. تست اتصال
-
-IP عمومی دستگاه مقصد را قبل و بعد از فعال‌کردن Exit Node مقایسه کنید. در صورت موفقیت باید IP خروجی Runner را مشاهده کنید.
-
----
+برای تست، IP عمومی دستگاه را قبل و بعد از فعال‌کردن Exit Node مقایسه کنید.
 
 # 🔄 سیستم چگونه آنلاین می‌ماند؟
 
-GitHub Actions اجازه اجرای نامحدود یک Job را نمی‌دهد. بنابراین پروژه به‌جای یک اجرای دائمی، چند Run را پشت سر هم زنجیر می‌کند.
+یک GitHub Actions Job نمی‌تواند برای همیشه اجرا شود. بنابراین پروژه Runها را پشت سر هم زنجیر می‌کند:
 
 ```text
 Run #1 → Run #2 → Run #3 → ...
 ```
 
-چند لایه recovery وجود دارد:
+چند مسیر Recovery وجود دارد:
 
-1. **Self-handover:** اجرای فعلی قبل از پایان، اجرای بعدی را آماده می‌کند.
-2. **Relaunch:** اگر handover موفق نشود، مسیر recovery تلاش می‌کند Run جدید ایجاد کند.
-3. **Watchdog:** وضعیت Runها را بررسی می‌کند و Runهای گمشده یا stale را recovery می‌کند.
-4. **Schedule:** یک مسیر پشتیبان برای راه‌اندازی مجدد زنجیره است.
+- **Self-relaunch:** اجرای فعلی قبل از پایان، اجرای بعدی را آماده می‌کند.
+- **Relaunch recovery:** در صورت شکست handover یا startup تلاش مجدد انجام می‌شود.
+- **Watchdog:** Runهای فعال، queued و stale را بررسی می‌کند.
+- **Scheduled backstop:** یک مسیر پشتیبان برای شروع مجدد زنجیره است.
+- **Crash-loop protection:** از ایجاد بی‌نهایت Run در صورت failure پشت‌سرهم جلوگیری می‌کند.
 
-همه این مسیرها از `.github/scripts/ensure-exit-node.sh` استفاده می‌کنند و اگر Run فعال یا queued وجود داشته باشد، اجرای اضافه ایجاد نمی‌کنند.
-
----
+منطق recovery در `.github/scripts/ensure-exit-node.sh` متمرکز است.
 
 # 🛑 توقف و اجرای دوباره
 
 برای توقف:
 
-**Actions → Tailscale Exit Node Watchdog → Run workflow**
+**Actions → Tailscale Exit Node Watchdog → Run workflow → `action=stop`**
 
-و:
-
-```text
-action = stop
-```
-
-را اجرا کنید.
-
-برای اجرای دوباره، `EXIT_NODE_DISABLED` را روی `false` قرار دهید یا حذف کنید و سپس watchdog را با `action=ensure` اجرا کنید.
-
----
-
-# 🧯 Crash-loop protection
-
-اگر چند Run پشت سر هم در مدت کوتاهی fail شوند، سیستم از ایجاد بی‌نهایت Run جلوگیری می‌کند تا Actions minutes بی‌دلیل مصرف نشود.
-
-علت‌های رایج:
-
-- اشتباه بودن OAuth credentials
-- منقضی شدن OAuth Client
-- نداشتن دسترسی `tag:exit`
-- مشکل تنظیمات GitHub Actions
-
----
+برای شروع دوباره، `EXIT_NODE_DISABLED` را روی `false` قرار دهید یا حذف کنید و سپس `action=ensure` را اجرا کنید.
 
 # 🛠️ عیب‌یابی
 
 ### Workflow اجرا نمی‌شود
 
-بررسی کنید:
+Actions را فعال کنید، وجود Secretها را بررسی کنید و مطمئن شوید PAT دارای **Actions: Read and write** است.
 
-1. Actions برای Fork فعال باشد.
-2. `ACTIONS_WATCHDOG_TOKEN` وجود داشته باشد و permission **Actions: Read and write** داشته باشد.
-3. Workflowها در `.github/workflows/` وجود داشته باشند.
-4. `EXIT_NODE_DISABLED` روی `true` نباشد.
-5. Workflow را از Fork خودتان اجرا کنید.
+### خطای Tailscale authentication
 
-### خطای احراز هویت Tailscale
+`TS_OAUTH_CLIENT_ID`، `TS_OAUTH_SECRET` و دسترسی OAuth Client به `tag:exit` را بررسی کنید.
 
-`TS_OAUTH_CLIENT_ID` و `TS_OAUTH_SECRET`، وضعیت OAuth Client و دسترسی آن به `tag:exit` را بررسی کنید.
+### Node دیده می‌شود ولی Exit Node نیست
 
-### Node در Tailscale دیده می‌شود ولی Exit Node نیست
-
-Logهای Workflow و تنظیمات approval در Tailscale را بررسی کنید.
+Approvalهای Tailscale، Tag و logهای Workflow را بررسی کنید.
 
 ### Exit Node بعداً قطع شد
 
-Runnerهای GitHub موقتی هستند و ممکن است Job متوقف شود. پروژه recovery خودکار دارد، اما uptime دائمی را تضمین نمی‌کند.
+Runnerهای GitHub موقتی هستند. سیستم recovery خودکار دارد، اما uptime دائمی را تضمین نمی‌کند.
 
----
+# 🔐 امنیت
 
-# 🔐 نکات امنیتی
-
-- هرگز `TS_OAUTH_SECRET` یا `ACTIONS_WATCHDOG_TOKEN` را Commit نکنید.
+- `TS_OAUTH_SECRET` و `ACTIONS_WATCHDOG_TOKEN` را Commit نکنید.
 - PAT را فقط به Repository خودتان محدود کنید.
-- فقط permissionهای موردنیاز را بدهید.
-- اگر Credential لو رفت، فوراً آن را revoke/rotate کنید.
-- فقط دستگاه‌ها و کاربران مورداعتماد را به Exit Node خودتان دسترسی دهید.
-
----
+- حداقل Permission لازم را بدهید.
+- در صورت افشای Credential، فوراً آن را revoke/rotate کنید.
 
 # 🧪 تست‌ها
 
@@ -269,19 +179,13 @@ Runnerهای GitHub موقتی هستند و ممکن است Job متوقف شو
 bash .github/scripts/tests/ensure-exit-node.test.sh
 ```
 
----
-
 # 📚 منابع رسمی
 
-- Tailscale GitHub Action: https://tailscale.com/docs/integrations/github/github-action
-- Tailscale OAuth clients: https://tailscale.com/docs/features/oauth-clients
-- Tailscale Exit Nodes: https://tailscale.com/docs/features/exit-nodes
-- GitHub Actions: https://docs.github.com/actions
-
----
+- [Tailscale GitHub Action](https://tailscale.com/docs/integrations/github/github-action)
+- [Tailscale OAuth clients](https://tailscale.com/docs/features/oauth-clients)
+- [Tailscale Exit Nodes](https://tailscale.com/docs/features/exit-nodes)
+- [GitHub Actions](https://docs.github.com/actions)
 
 # ⚠️ محدودیت مهم
 
-این پروژه یک روش خلاقانه برای اجرای Tailscale Exit Node روی GitHub Actions است، اما جایگزین VPS یا سرور دائمی نیست.
-
-GitHub می‌تواند Runnerها را متوقف کند، Workflowها را محدود کند یا دسترسی به Actions را تغییر دهد. بنابراین حتی با self-relaunch و watchdog نیز **تضمین uptime دائمی یا 24/7 وجود ندارد**.
+این پروژه یک روش خلاقانه برای اجرای Tailscale Exit Node روی GitHub Actions است و جایگزین VPS یا سرور دائمی نیست. GitHub می‌تواند Runnerها را متوقف کند، Workflowها را محدود کند یا دسترسی به Actions را تغییر دهد؛ بنابراین **تضمین uptime دائمی یا 24/7 وجود ندارد**.
