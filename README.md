@@ -1,295 +1,287 @@
-# supreme-palm-tree
+[English](./README.en.md)
 
-A Tailscale exit node that runs on GitHub Actions and keeps itself online.
+# supreme-palm-tree — راهنمای فارسی 🇮🇷
 
-> **What is this?** This project turns a GitHub Actions runner into a temporary Tailscale exit node. Your phone, PC, or another Tailscale device can then send its internet traffic through that runner.
->
-> **Important:** GitHub-hosted runners are temporary cloud machines. This project is designed for personal experimentation and lightweight use, not as a guaranteed 24/7 VPN service. GitHub can cancel jobs, change runner availability, or enforce usage limits.
+یک Tailscale Exit Node که روی GitHub Actions اجرا می‌شود و با مکانیزم‌های self-relaunch و watchdog سعی می‌کند تا حد ممکن آنلاین بماند.
 
-## Beginner setup — run your own Exit Node
+> ⚠️ **نکته مهم:** GitHub Actions یک سرور VPS دائمی نیست. Runnerها موقتی هستند و اجرای هر Job محدودیت زمانی دارد. این پروژه با زنجیره‌کردن اجراها و مکانیزم recovery برای uptime بالا طراحی شده، اما تضمین 24/7 نمی‌دهد.
 
-You do **not** need Linux, a VPS, or a server. Everything is configured from GitHub's website.
+## این پروژه دقیقاً چه کار می‌کند؟
 
-### 1. Create your own copy
+به‌جای اینکه Exit Node را روی یک کامپیوتر یا VPS دائمی اجرا کنید، GitHub Actions یک Linux runner موقت می‌سازد و Tailscale را روی آن اجرا می‌کند.
 
-The easiest method is to click **Fork** on this repository and create the fork under your own GitHub account.
+هر اجرا حداکثر برای مدت مشخصی آنلاین می‌ماند و قبل از پایان، اجرای بعدی را آماده می‌کند. در کنار آن، watchdog وضعیت سیستم را بررسی می‌کند و اگر Exit Node از کار افتاده باشد، دوباره آن را راه‌اندازی می‌کند.
 
-After forking, work only in **your own fork**. Your fork should contain the `.github/workflows/` and `.github/scripts/` directories from this repository.
-
-### 2. Create a Tailscale account
-
-Create or sign in to your Tailscale account, then open the Tailscale admin console.
-
-You need permission to create an OAuth client. Tailscale documents this as requiring Owner, Admin, Network admin, or IT admin permissions depending on the operation.
-
-### 3. Create the `tag:exit` tag
-
-This project expects the GitHub runner to be registered with the tag **`tag:exit`**.
-
-In Tailscale, create the tag:
+ساختار کلی:
 
 ```text
-exit
+GitHub Actions Runner
+        │
+        ▼
+   Tailscale Node
+        │
+        ▼
+    tag:exit
+        │
+        ▼
+    Exit Node
+        │
+        ├── Self-relaunch → اجرای بعدی
+        │
+        └── Watchdog → بررسی و Recovery
 ```
 
-Tailscale displays tags with the `tag:` prefix, so the resulting tag is:
+---
+
+# 🚀 آموزش راه‌اندازی از صفر
+
+این راهنما برای کاربری نوشته شده که حتی قبلاً با GitHub Actions یا Tailscale کار نکرده است.
+
+## پیش‌نیازها
+
+- یک حساب GitHub
+- یک حساب Tailscale
+- دسترسی به GitHub Actions
+- یک دستگاه مقصد که Tailscale روی آن نصب باشد
+
+---
+
+## 1. ساخت Fork از پروژه
+
+ابتدا وارد صفحه اصلی پروژه شوید و روی **Fork** بزنید.
+
+بعد از Fork، یک کپی از پروژه داخل حساب GitHub خودتان خواهید داشت.
+
+از این به بعد **Fork خودتان** را استفاده کنید، نه ریپوی اصلی.
+
+---
+
+## 2. ساخت حساب Tailscale و Tag
+
+اگر حساب Tailscale ندارید، یک حساب بسازید و وارد پنل شوید.
+
+این پروژه از Tag زیر استفاده می‌کند:
 
 ```text
- tag:exit
+tag:exit
 ```
 
-Make sure your OAuth client is allowed to use/own this tag. Tailscale's GitHub Actions documentation requires a configured tag for tagged ephemeral nodes, and OAuth clients can be restricted to specific tags.
+در Policy/ACL تیل‌اسکیل، Tag را طوری تنظیم کنید که OAuth Client شما بتواند آن را به Node اختصاص دهد.
 
-### 4. Create a Tailscale OAuth client
+---
 
-In the Tailscale admin console, create an **OAuth client**.
+## 3. ساخت Tailscale OAuth Client
 
-Give the client the permissions required by this project and allow it to use `tag:exit`.
+در پنل مدیریت Tailscale یک **OAuth Client** بسازید و اجازه استفاده از `tag:exit` را به آن بدهید.
 
-Copy these two values immediately:
+دو مقدار دریافت می‌کنید:
 
 ```text
-Client ID
-Client secret
+TS_OAUTH_CLIENT_ID
+TS_OAUTH_SECRET
 ```
 
-**Never paste the client secret into the README, an issue, a chat, or a commit.** Store it only as a GitHub secret.
+> **هشدار:** `TS_OAUTH_SECRET` را داخل کد، README، Issue، Commit یا Chat عمومی قرار ندهید.
 
-Tailscale's official documentation explains OAuth clients and the available scopes/tags in detail:
+---
 
-- https://tailscale.com/docs/features/oauth-clients
-- https://tailscale.com/docs/integrations/github/github-action
+## 4. ساخت GitHub Fine-grained PAT
 
-### 5. Add the Tailscale secrets to GitHub
+برای watchdog یک **Fine-grained Personal Access Token** بسازید.
 
-Open your fork on GitHub and go to:
+Repository access را فقط به **Fork خودتان** محدود کنید.
 
-**Settings → Secrets and variables → Actions → New repository secret**
-
-Create these two repository secrets:
-
-| Name | Value |
-| ---- | ----- |
-| `TS_OAUTH_CLIENT_ID` | Your Tailscale OAuth Client ID |
-| `TS_OAUTH_SECRET` | Your Tailscale OAuth Client secret |
-
-Do **not** create normal repository variables for these credentials. They are secrets because they are authentication credentials.
-
-GitHub automatically masks secrets in workflow logs, but you should still never print them deliberately.
-
-### 6. Create the GitHub watchdog token
-
-This repository can use a dedicated GitHub token for the watchdog. This is recommended because it gives the watchdog an independent identity from the temporary `GITHUB_TOKEN` used by a workflow run.
-
-Create a **fine-grained Personal Access Token** from your GitHub account.
-
-Recommended settings:
-
-- **Resource owner:** your GitHub account
-- **Repository access:** Only select repositories
-- Select **your fork** of this repository
-- **Repository permissions → Actions:** `Read and write`
-- **Repository permissions → Metadata:** `Read-only` (normally mandatory/default)
-
-The token needs to be able to dispatch the Exit Node workflow. GitHub's API documentation lists **Actions: write** as the required fine-grained permission for creating a workflow dispatch event.
-
-Copy the token once it is created.
-
-Then add it to your fork as:
+حداقل permission لازم:
 
 ```text
-Settings → Secrets and variables → Actions → New repository secret
+Actions: Read and write
 ```
 
-Name it exactly:
+`Metadata: Read-only` نیز معمولاً به‌صورت پیش‌فرض لازم است.
+
+سپس Token را به‌عنوان Secret زیر در Fork ذخیره کنید:
 
 ```text
 ACTIONS_WATCHDOG_TOKEN
 ```
 
-and paste the token as its value.
+> Token را مثل رمز عبور نگه دارید و هرگز Commit نکنید.
 
-**Treat this token like a password.** Never commit it to the repository.
+---
 
-### 7. Check Actions permissions
+## 5. اضافه‌کردن Secrets به GitHub
 
-In your fork, open:
+در Fork خودتان بروید به:
 
-**Settings → Actions → General → Workflow permissions**
+**Settings → Secrets and variables → Actions → New repository secret**
 
-Make sure Actions are enabled and workflows are allowed to run.
+این Secretها را بسازید:
 
-For this project, the workflow files already declare the permissions they need. Do not randomly increase permissions unless you understand why they are required.
+| نام | مقدار |
+|---|---|
+| `TS_OAUTH_CLIENT_ID` | OAuth Client ID از Tailscale |
+| `TS_OAUTH_SECRET` | OAuth Client Secret از Tailscale |
+| `ACTIONS_WATCHDOG_TOKEN` | Fine-grained PAT |
 
-### 8. Start the Exit Node
+---
 
-Now open:
+## 6. فعال‌کردن GitHub Actions
 
-**Actions → Tailscale Exit Node Watchdog**
+وارد تب **Actions** شوید و اگر GitHub خواست، Workflowها را فعال کنید.
 
-Click:
+---
 
-**Run workflow**
+## 7. اولین اجرای Exit Node
 
-Set:
+به مسیر زیر بروید:
+
+**Actions → Tailscale Exit Node Watchdog → Run workflow**
+
+مقدار زیر را انتخاب کنید:
 
 ```text
 action = ensure
 ```
 
-Then click **Run workflow**.
+سپس **Run workflow** را بزنید.
 
-The watchdog checks whether an Exit Node run already exists. If not, it starts one.
+Watchdog بررسی می‌کند که آیا Exit Node فعال است یا نه و در صورت نیاز Workflow مربوط به Exit Node را اجرا می‌کند.
 
-You can also start **Tailscale Exit Node** directly, but using the watchdog is the recommended first start because it is the recovery/supervisor entry point.
+---
 
-### 9. Wait for the runner to connect
+## 8. بررسی Runner
 
-Open:
+در **Actions → Tailscale Exit Node** اجرای جدید را باز کنید.
 
-**Actions → Tailscale Exit Node**
+پس از موفقیت، یک Linux runner موقت در Tailscale با هویت `tag:exit` خواهید دید.
 
-and open the running job.
+---
 
-Wait until the Tailscale setup and health checks complete successfully.
+## 9. تأیید Exit Node
 
-Then open the Tailscale admin console and look at your devices. The GitHub runner should appear as a temporary/ephemeral device using the `tag:exit` identity.
+در Tailscale Admin Console دستگاه جدید را پیدا کنید. اگر Tailscale درخواست approval کرد، آن را تأیید کنید.
 
-The exact device name can change because GitHub-hosted runners are disposable.
+Workflow، Runner را به‌عنوان Exit Node advertise می‌کند. سپس روی دستگاه مقصد:
 
-### 10. Approve the Exit Node if Tailscale asks you to
+**Tailscale → Exit node → انتخاب GitHub runner**
 
-Tailscale may require the new device to be approved, depending on your tailnet's device-approval configuration and how the OAuth credentials were created.
+را انجام دهید.
 
-If approval is required, approve the new device in the Tailscale admin console.
+---
 
-### 11. Enable it as an Exit Node
+## 10. تست اتصال
 
-The workflow advertises the runner as an exit node. In Tailscale, make sure the node is allowed to act as an exit node if your tailnet requires an additional approval/permission step.
+IP عمومی دستگاه مقصد را قبل و بعد از فعال‌کردن Exit Node مقایسه کنید. در صورت موفقیت باید IP خروجی Runner را مشاهده کنید.
 
-Then, on the device that should use it:
+---
 
-**Tailscale → Exit node → select your GitHub runner**
+# 🔄 سیستم چگونه آنلاین می‌ماند؟
 
-Tailscale officially documents the exit-node flow here:
+GitHub Actions اجازه اجرای نامحدود یک Job را نمی‌دهد. بنابراین پروژه به‌جای یک اجرای دائمی، چند Run را پشت سر هم زنجیر می‌کند.
 
-- https://tailscale.com/docs/features/exit-nodes
+```text
+Run #1 → Run #2 → Run #3 → ...
+```
 
-### 12. Test your connection
+چند لایه recovery وجود دارد:
 
-On the client device, enable the GitHub runner as the Tailscale exit node and then check your public IP.
+1. **Self-handover:** اجرای فعلی قبل از پایان، اجرای بعدی را آماده می‌کند.
+2. **Relaunch:** اگر handover موفق نشود، مسیر recovery تلاش می‌کند Run جدید ایجاد کند.
+3. **Watchdog:** وضعیت Runها را بررسی می‌کند و Runهای گمشده یا stale را recovery می‌کند.
+4. **Schedule:** یک مسیر پشتیبان برای راه‌اندازی مجدد زنجیره است.
 
-The public IP should now be the IP of the GitHub runner rather than your normal connection.
+همه این مسیرها از `.github/scripts/ensure-exit-node.sh` استفاده می‌کنند و اگر Run فعال یا queued وجود داشته باشد، اجرای اضافه ایجاد نمی‌کنند.
 
-You can also check the GitHub Actions log for the project's built-in health checks.
+---
 
-## How the automatic recovery works
+# 🛑 توقف و اجرای دوباره
 
-A GitHub Actions job cannot run forever, so the exit node is a chain of runs rather than a single long one. Each run stays online for `ONLINE_MINUTES` (330 by default, under GitHub's 360-minute job ceiling) and then hands over to its successor:
+برای توقف:
 
-1. **Handover.** Shortly before it ends, the running job dispatches the next run. Because the workflow uses a `concurrency` group, that run waits in the queue instead of starting a second exit node, and begins the moment the current run releases the group. The gap is the runner startup time.
-2. **Relaunch job.** Runs only if the handover did not succeed, which covers cancellation, startup failure, and a rejected dispatch.
-3. **Watchdog.** Triggered by `workflow_run: completed` on the exit node workflow, so it reacts as soon as a run finishes, plus a `*/10` cron as a last-resort backstop. It also replaces runs that are stuck: active, overdue, and no longer reporting progress to GitHub.
-4. **Schedule.** The exit node workflow keeps a `17 */6` cron so the chain can restart itself even if every step above failed.
+**Actions → Tailscale Exit Node Watchdog → Run workflow**
 
-All four paths call the same script, `.github/scripts/ensure-exit-node.sh`, which never starts a node when one is already active or queued.
+و:
 
-## Starting and stopping
+```text
+action = stop
+```
 
-| Action | How |
-| ------ | --- |
-| Start | Run **Tailscale Exit Node Watchdog** with `action=ensure`, or **Tailscale Exit Node** directly |
-| Stop | Run **Tailscale Exit Node Watchdog** with `action=stop` |
+را اجرا کنید.
 
-Stopping is handled by the watchdog because a dispatch of the exit node workflow can only queue behind the run that already holds the concurrency group. `action=stop` sets the repository variable `EXIT_NODE_DISABLED` to `true` and then cancels the active runs. Cancelling alone would not be enough, since a cancelled run still triggers its own relaunch.
+برای اجرای دوباره، `EXIT_NODE_DISABLED` را روی `false` قرار دهید یا حذف کنید و سپس watchdog را با `action=ensure` اجرا کنید.
 
-To start again, set `EXIT_NODE_DISABLED` to `false` or delete the variable, then run the watchdog.
+---
 
-## Crash-loop guard
+# 🧯 Crash-loop protection
 
-If the last three runs all failed in under 15 minutes, the script stops dispatching instead of burning Actions minutes on a node that cannot start.
+اگر چند Run پشت سر هم در مدت کوتاهی fail شوند، سیستم از ایجاد بی‌نهایت Run جلوگیری می‌کند تا Actions minutes بی‌دلیل مصرف نشود.
 
-Runs ended by the concurrency group are ignored here, because they are a normal part of replacing a queued run.
+علت‌های رایج:
 
-The usual causes of a real crash loop are expired `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` credentials, an OAuth client that no longer owns `tag:exit`, or a GitHub Actions configuration problem.
+- اشتباه بودن OAuth credentials
+- منقضی شدن OAuth Client
+- نداشتن دسترسی `tag:exit`
+- مشکل تنظیمات GitHub Actions
 
-## Configuration
+---
 
-### Secrets
+# 🛠️ عیب‌یابی
 
-| Name | Purpose |
-| ---- | ------- |
-| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID |
-| `TS_OAUTH_SECRET` | Tailscale OAuth client secret |
-| `ACTIONS_WATCHDOG_TOKEN` | Fine-grained GitHub PAT with Actions: read/write for this repository, used by the watchdog to dispatch workflows |
+### Workflow اجرا نمی‌شود
 
-### Variables
+بررسی کنید:
 
-| Name | Purpose |
-| ---- | ------- |
-| `EXIT_NODE_DISABLED` | Kill switch. `true` stops the relaunch chain. |
+1. Actions برای Fork فعال باشد.
+2. `ACTIONS_WATCHDOG_TOKEN` وجود داشته باشد و permission **Actions: Read and write** داشته باشد.
+3. Workflowها در `.github/workflows/` وجود داشته باشند.
+4. `EXIT_NODE_DISABLED` روی `true` نباشد.
+5. Workflow را از Fork خودتان اجرا کنید.
 
-Tunable knobs live in `env:` at the top of the Exit Node workflow and as environment defaults in `ensure-exit-node.sh`.
+### خطای احراز هویت Tailscale
 
-## Troubleshooting
+`TS_OAUTH_CLIENT_ID` و `TS_OAUTH_SECRET`، وضعیت OAuth Client و دسترسی آن به `tag:exit` را بررسی کنید.
 
-### The workflow does not start
+### Node در Tailscale دیده می‌شود ولی Exit Node نیست
 
-Check:
+Logهای Workflow و تنظیمات approval در Tailscale را بررسی کنید.
 
-1. **Actions are enabled** for your fork.
-2. `ACTIONS_WATCHDOG_TOKEN` exists and has **Actions: Read and write** for the correct repository.
-3. The workflow exists under `.github/workflows/`.
-4. `EXIT_NODE_DISABLED` is not set to `true`.
-5. You are running the workflow from your own fork, not the upstream repository.
+### Exit Node بعداً قطع شد
 
-### Tailscale authentication fails
+Runnerهای GitHub موقتی هستند و ممکن است Job متوقف شود. پروژه recovery خودکار دارد، اما uptime دائمی را تضمین نمی‌کند.
 
-Check that:
+---
 
-- `TS_OAUTH_CLIENT_ID` is correct.
-- `TS_OAUTH_SECRET` is correct.
-- The OAuth client is still active.
-- The OAuth client can use the `tag:exit` tag.
-- Your Tailscale account has enough permissions to create/use the OAuth client and tag.
+# 🔐 نکات امنیتی
 
-Do not paste the secret into an issue or log. Rotate the credential in Tailscale if you accidentally expose it.
+- هرگز `TS_OAUTH_SECRET` یا `ACTIONS_WATCHDOG_TOKEN` را Commit نکنید.
+- PAT را فقط به Repository خودتان محدود کنید.
+- فقط permissionهای موردنیاز را بدهید.
+- اگر Credential لو رفت، فوراً آن را revoke/rotate کنید.
+- فقط دستگاه‌ها و کاربران مورداعتماد را به Exit Node خودتان دسترسی دهید.
 
-### The node appears in Tailscale but cannot be selected as an Exit Node
+---
 
-Check the GitHub Actions log for the exit-node advertisement and health-check steps. Then check the Tailscale admin console for device approval or exit-node approval requirements.
+# 🧪 تست‌ها
 
-### The Exit Node stops later
-
-That can happen. GitHub-hosted runners are not permanent servers, and GitHub may cancel a job or make a runner unavailable. This repository's purpose is to recover automatically when possible, not to provide an uptime guarantee.
-
-Check **Actions → Tailscale Exit Node Watchdog** first. If the watchdog is repeatedly failing, inspect its logs before restarting the Exit Node manually.
-
-### `action=stop` does not work
-
-The stop operation needs permission to update the repository variable `EXIT_NODE_DISABLED`. If the token/workflow permissions in your fork were customized, verify that the workflow has the required Actions/Variables permissions.
-
-## Security notes
-
-- Never commit `TS_OAUTH_SECRET` or `ACTIONS_WATCHDOG_TOKEN`.
-- Prefer a fine-grained GitHub PAT restricted to **only this repository**.
-- Give the PAT only the permissions required by the workflow.
-- Do not share your Tailscale OAuth secret with other people.
-- If a credential is exposed, revoke/rotate it immediately.
-- Remember that an exit node routes a device's internet traffic through the runner. Only use a tailnet and GitHub account you control, and only allow people/devices you trust to use the exit node.
-
-## Tests
-
-The handover logic is tested offline against a `curl` test double, so no network or GitHub token is needed:
+منطق handover را می‌توان بدون شبکه تست کرد:
 
 ```bash
 bash .github/scripts/tests/ensure-exit-node.test.sh
 ```
 
-## Official documentation
+---
+
+# 📚 منابع رسمی
 
 - Tailscale GitHub Action: https://tailscale.com/docs/integrations/github/github-action
 - Tailscale OAuth clients: https://tailscale.com/docs/features/oauth-clients
 - Tailscale Exit Nodes: https://tailscale.com/docs/features/exit-nodes
-- GitHub Actions workflow dispatch API: https://docs.github.com/en/rest/actions/workflows
-- GitHub Actions secrets: https://docs.github.com/en/actions/reference/security/secrets
+- GitHub Actions: https://docs.github.com/actions
+
+---
+
+# ⚠️ محدودیت مهم
+
+این پروژه یک روش خلاقانه برای اجرای Tailscale Exit Node روی GitHub Actions است، اما جایگزین VPS یا سرور دائمی نیست.
+
+GitHub می‌تواند Runnerها را متوقف کند، Workflowها را محدود کند یا دسترسی به Actions را تغییر دهد. بنابراین حتی با self-relaunch و watchdog نیز **تضمین uptime دائمی یا 24/7 وجود ندارد**.
