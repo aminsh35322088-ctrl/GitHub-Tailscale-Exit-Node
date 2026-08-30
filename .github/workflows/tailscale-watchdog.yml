@@ -1,16 +1,15 @@
 name: Tailscale Exit Node Watchdog
 
 on:
-  # Primary trigger: react the moment an exit node run finishes, instead of
-  # waiting for the next cron tick.
+  # Primary trigger: repair immediately after the Exit Node workflow finishes.
   workflow_run:
     workflows: [Tailscale Exit Node]
     types: [completed]
 
-  # Backstop for the case where the self-relaunch chain is broken entirely,
-  # for example because a dispatch was rejected while the API was degraded.
+  # Independent PAT-backed backstop. This intentionally keeps the proven
+  # periodic supervisor model from the original watchdog.
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '7,22,37,52 * * * *'
 
   workflow_dispatch:
     inputs:
@@ -23,6 +22,9 @@ on:
           - ensure
           - stop
 
+# The watchdog deliberately uses the dedicated PAT. This keeps recovery
+# independent from the GITHUB_TOKEN permission model used by the Exit Node
+# workflow itself.
 permissions:
   contents: read
   actions: write
@@ -43,14 +45,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Stopping has to happen here rather than in the exit node workflow: a
-      # dispatch of that workflow can only queue behind the run that already
-      # holds the concurrency group, so it could never stop it.
+      - name: Validate Watchdog Token
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::ACTIONS_WATCHDOG_TOKEN is required for the PAT-backed watchdog."
+            exit 1
+          fi
+          echo "Dedicated watchdog PAT is configured."
+
+      # Stop remains an explicit kill switch. It runs through the same PAT so
+      # it does not depend on GITHUB_TOKEN permissions.
       - name: Stop Exit Node
         if: ${{ inputs.action == 'stop' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
@@ -62,9 +75,6 @@ jobs:
           )
           API="https://api.github.com/repos/${REPO}"
 
-          # The kill switch must be set first. Cancelling alone is not enough:
-          # a cancelled run still triggers the relaunch job, which would start
-          # a replacement.
           echo "Setting the EXIT_NODE_DISABLED repository variable..."
           CODE="$(curl -sS -o /tmp/var.json -w '%{http_code}' \
             -X PATCH "${AUTH[@]}" -H 'Content-Type: application/json' \
@@ -80,22 +90,19 @@ jobs:
 
           case "$CODE" in
             201|204)
-              echo "Kill switch is set. The relaunch chain will not restart the node."
+              echo "Kill switch is set."
               ;;
             *)
               echo "::error::Could not set EXIT_NODE_DISABLED (HTTP ${CODE})."
               cat /tmp/var.json 2>/dev/null || true
-              echo "::error::ACTIONS_WATCHDOG_TOKEN needs a scope that permits writing repository variables."
-              echo "::error::Set the variable manually, then re-run this workflow with action=stop."
               exit 1
               ;;
           esac
 
-          echo "Cancelling active exit node runs..."
           RUNS="$(curl -fsSL "${AUTH[@]}" \
             "${API}/actions/workflows/${EXIT_NODE_WORKFLOW}/runs?per_page=30" || true)"
           if [ -z "$RUNS" ]; then
-            echo "::warning::Could not list runs. The node stops on its own once the current run ends."
+            echo "::warning::Could not list runs. The current run will finish normally."
             exit 0
           fi
 
@@ -107,13 +114,15 @@ jobs:
               echo "Run ${ID}: cancel returned HTTP ${C}"
             done
 
-          echo "Exit node stopped. Remove or set EXIT_NODE_DISABLED to false to start it again."
+          echo "Exit node stopped."
 
+      # The proven ensure logic remains the single source of truth for
+      # idempotency, stale-run cleanup, confirmation and crash-loop protection.
       - name: Ensure an Exit Node Is Running
         if: ${{ inputs.action != 'stop' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN }}
           REPO: ${{ github.repository }}
           WORKFLOW: ${{ env.EXIT_NODE_WORKFLOW }}
           DISABLED: ${{ vars.EXIT_NODE_DISABLED }}
@@ -123,7 +132,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN }}
           REPO: ${{ github.repository }}
           DISABLED: ${{ vars.EXIT_NODE_DISABLED }}
         run: |
