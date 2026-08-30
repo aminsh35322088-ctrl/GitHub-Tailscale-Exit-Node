@@ -1,17 +1,11 @@
 name: Tailscale Exit Node Watchdog
 
 on:
-  # Primary trigger: react the moment an exit node run finishes, instead of
-  # waiting for the next cron tick.
   workflow_run:
     workflows: [Tailscale Exit Node]
     types: [completed]
-
-  # Backstop for the case where the self-relaunch chain is broken entirely,
-  # for example because a dispatch was rejected while the API was degraded.
   schedule:
     - cron: '*/10 * * * *'
-
   workflow_dispatch:
     inputs:
       action:
@@ -43,17 +37,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Stopping has to happen here rather than in the exit node workflow: a
-      # dispatch of that workflow can only queue behind the run that already
-      # holds the concurrency group, so it could never stop it.
       - name: Stop Exit Node
         if: ${{ inputs.action == 'stop' }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.ACTIONS_WATCHDOG_TOKEN || github.token }}
+          WATCHDOG_PAT: ${{ secrets.ACTIONS_WATCHDOG_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
+
+          if [ -z "$WATCHDOG_PAT" ]; then
+            echo "::error::action=stop requires ACTIONS_WATCHDOG_TOKEN with Variables: Read and write permission."
+            exit 1
+          fi
 
           AUTH=(
             -H "Accept: application/vnd.github+json"
@@ -62,9 +59,6 @@ jobs:
           )
           API="https://api.github.com/repos/${REPO}"
 
-          # The kill switch must be set first. Cancelling alone is not enough:
-          # a cancelled run still triggers the relaunch job, which would start
-          # a replacement.
           echo "Setting the EXIT_NODE_DISABLED repository variable..."
           CODE="$(curl -sS -o /tmp/var.json -w '%{http_code}' \
             -X PATCH "${AUTH[@]}" -H 'Content-Type: application/json' \
@@ -85,8 +79,7 @@ jobs:
             *)
               echo "::error::Could not set EXIT_NODE_DISABLED (HTTP ${CODE})."
               cat /tmp/var.json 2>/dev/null || true
-              echo "::error::ACTIONS_WATCHDOG_TOKEN needs a scope that permits writing repository variables."
-              echo "::error::Set the variable manually, then re-run this workflow with action=stop."
+              echo "::error::ACTIONS_WATCHDOG_TOKEN needs Variables: Read and write permission."
               exit 1
               ;;
           esac
