@@ -1,4 +1,4 @@
-# supreme-palm-tree
+# Tailscale exit node
 
 A Tailscale exit node that runs on GitHub Actions and keeps itself online.
 
