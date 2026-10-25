@@ -17,10 +17,10 @@ A beginner-friendly guide to running a Tailscale internet gateway on GitHub Acti
 | Item | Value |
 | :--- | :--- |
 | Execution state | 🟢 Keep-alive running · setup verified |
-| Last checked | 2026-10-25 04:41:47 UTC |
+| Last checked | 2026-10-25 06:57:55 UTC |
 | Configured name | `GitHub-Exit` |
 | Keep-alive started | 2026-10-25 04:41:36 UTC |
-| Elapsed at this check | 0 min |
+| Elapsed at this check | 136 min |
 | Nominal handover | 2026-10-25 10:11:36 UTC |
 | Run details | [Open run](https://github.com/aminsh35322088-ctrl/GitHub-Tailscale-Exit-Node/actions/runs/40162708440) |
 
