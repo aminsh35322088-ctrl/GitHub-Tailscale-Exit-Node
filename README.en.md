@@ -17,7 +17,7 @@ A beginner-friendly guide to running a Tailscale internet gateway on GitHub Acti
 | Item | Value |
 | :--- | :--- |
 | Execution state | 🟡 Starting · readiness not confirmed |
-| Last checked | 2026-10-30 18:28:00 UTC |
+| Last checked | 2026-10-30 18:29:19 UTC |
 | Configured name | `GitHub-Exit` |
 | Keep-alive started | — |
 | Elapsed at this check | — |
